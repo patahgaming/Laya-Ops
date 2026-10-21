@@ -18,15 +18,22 @@ from .schemas import (
     AlertGroup,
     AlertsResponse,
     AlertSummary,
+    ClassifierHealth,
     Decision,
     DecisionsResponse,
+    EngineDecision,
+    EngineHealer,
     Guest,
     Guests,
     GuestsResponse,
     Job,
     KnobsResponse,
+    MetricCounter,
     Metrics,
     Overview,
+    PendingApproval,
+    PendingResponse,
+    PushedAlert,
     Runbook,
     SourceStatus,
     Status,
@@ -77,6 +84,16 @@ def hhmm(value: str | None) -> str:
     return parsed.strftime("%H:%M") if parsed else "—"
 
 
+def epoch_iso(value: Any) -> str:
+    """Epoch seconds (healer approvals / sre-healer decisions) -> ISO-8601 UTC."""
+    if value in (None, ""):
+        return ""
+    try:
+        return datetime.fromtimestamp(float(value), UTC).isoformat(timespec="seconds")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return to_iso(str(value))
+
+
 # ------------------------------------------------------------------- normalisers
 
 
@@ -100,6 +117,7 @@ def parse_summary(raw: Any) -> Summary:
         aksi_24h=int(raw.get("aksi_24j") or raw.get("aksi_24h") or 0),
         pulih_24h=int(raw.get("pulih_24j") or raw.get("pulih_24h") or 0),
         eskalasi_24h=int(raw.get("eskalasi_24j") or raw.get("eskalasi_24h") or 0),
+        menunggu_persetujuan=int(raw.get("menunggu_persetujuan") or 0),
         dry=bool(raw.get("dry")),
         targets=targets,
     )
@@ -113,6 +131,7 @@ def normalize_decision(record: dict[str, Any]) -> Decision:
         vmid = None
     nama = str(record.get("nama") or "") or None
     target = str(record.get("target") or "") or (nama or (f"#{vmid}" if vmid else "—"))
+    agent = record.get("agent")
     return Decision(
         ts=to_iso(str(record.get("ts") or "")) or str(record.get("ts") or ""),
         time=hhmm(str(record.get("ts") or "")),
@@ -125,6 +144,14 @@ def normalize_decision(record: dict[str, Any]) -> Decision:
         vmid=vmid,
         nama=nama,
         node=str(record.get("node") or "") or None,
+        jenis=str(record.get("jenis") or ""),
+        tingkat=str(record.get("tingkat") or ""),
+        izin=str(record.get("izin") or ""),
+        jenis_guest=str(record.get("jenis_guest") or ""),
+        status=str(record.get("status") or ""),
+        agent=bool(agent) if isinstance(agent, bool) else None,
+        oleh=str(record.get("oleh") or ""),
+        state=str(record.get("state") or ""),
         dry=bool(record.get("dry") and record.get("dry") is not False),
     )
 
@@ -182,9 +209,15 @@ def build_guests(state: Any, decisions: list[Decision]) -> Guests:
     )
 
 
-def normalize_alerts(alerts_payload: Any, ages_payload: Any) -> AlertSummary:
+def normalize_alerts(
+    alerts_payload: Any,
+    ages_payload: Any,
+    pushed_payload: Any = None,
+    pushed_ok: bool = False,
+) -> AlertSummary:
+    pushed = normalize_pushed_alerts(pushed_payload) if pushed_ok else []
     if not isinstance(alerts_payload, dict):
-        return AlertSummary(ok=False)
+        return AlertSummary(ok=False, pushed=pushed, pushed_ok=pushed_ok)
     series = (alerts_payload.get("data") or {}).get("result") or []
     ages = (ages_payload or {}).get("data", {}).get("result") or [] if isinstance(ages_payload, dict) else []
     starts: dict[tuple[str, str], float] = {}
@@ -253,7 +286,14 @@ def normalize_alerts(alerts_payload: Any, ages_payload: Any) -> AlertSummary:
                 runbook=runbook_for(group["name"], namespaces),
             )
         )
-    return AlertSummary(ok=True, instances=len(series), counts=counts, groups=out)
+    return AlertSummary(
+        ok=True,
+        instances=len(series),
+        counts=counts,
+        groups=out,
+        pushed=pushed,
+        pushed_ok=pushed_ok,
+    )
 
 
 def normalize_jobs(up_payload: Any, down_payload: Any) -> list[Job]:
@@ -285,23 +325,274 @@ def normalize_jobs(up_payload: Any, down_payload: Any) -> list[Job]:
     return jobs
 
 
+# Proxmox healer serialises prometheus labels positionally as a/b/c.
+_METRIC_LABELS = {
+    "pve_healer_aksi_total": {"a": "aksi", "b": "sumber", "c": "hasil"},
+    "pve_healer_k8s_aksi_total": {"a": "aksi", "b": "hasil"},
+    "pve_healer_insiden_total": {"a": "jenis"},
+    "pve_healer_k8s_insiden_total": {"a": "namespace"},
+    "pve_healer_persetujuan_total": {"a": "status"},
+    "pve_healer_node_gagal_total": {"a": "node"},
+    "pve_healer_k8s_eskalasi_total": {"a": "alasan"},
+}
+_METRIC_LINE = re.compile(
+    r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{([^}]*)\})?\s+([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)$"
+)
+_METRIC_LABEL = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"')
+
+
+def _parse_metrics_text(text: str) -> dict[str, list[tuple[dict[str, str], float]]]:
+    samples: dict[str, list[tuple[dict[str, str], float]]] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = _METRIC_LINE.match(line)
+        if not match:
+            continue
+        name, label_blob, raw_value = match.groups()
+        labels = {
+            key: value.replace('\\"', '"').replace("\\\\", "\\")
+            for key, value in _METRIC_LABEL.findall(label_blob or "")
+        }
+        try:
+            value = float(raw_value)
+        except ValueError:
+            continue
+        samples.setdefault(name, []).append((labels, value))
+    return samples
+
+
+def _counters(
+    samples: dict[str, list[tuple[dict[str, str], float]]], name: str
+) -> list[MetricCounter]:
+    mapping = _METRIC_LABELS.get(name, {})
+    out = [
+        MetricCounter(
+            labels={mapping.get(key, key): value for key, value in labels.items()},
+            value=int(value),
+        )
+        for labels, value in samples.get(name, [])
+    ]
+    out.sort(key=lambda item: (-item.value, str(sorted(item.labels.items()))))
+    return out
+
+
 def parse_metrics(text: Any) -> Metrics:
     if not isinstance(text, str):
         return Metrics()
 
-    def grab(pattern: str) -> int | None:
-        match = re.search(pattern, text, re.MULTILINE)
-        return int(float(match.group(1))) if match else None
+    samples = _parse_metrics_text(text)
+
+    def scalar(name: str) -> int | None:
+        rows = samples.get(name)
+        return int(rows[0][1]) if rows else None
 
     return Metrics(
-        healer_up=grab(r"^pve_healer_up\s+([\d.]+)"),
-        healer_dry=grab(r"^pve_healer_dry_run\s+([\d.]+)"),
+        healer_up=scalar("pve_healer_up"),
+        healer_dry=scalar("pve_healer_dry_run"),
+        pending=scalar("pve_healer_menunggu_persetujuan"),
+        action_totals=_counters(samples, "pve_healer_aksi_total"),
+        incident_totals=_counters(samples, "pve_healer_insiden_total"),
+        approval_totals=_counters(samples, "pve_healer_persetujuan_total"),
+        escalation_total=scalar("pve_healer_eskalasi_total"),
+        k8s_action_totals=_counters(samples, "pve_healer_k8s_aksi_total"),
+        k8s_escalation_totals=_counters(samples, "pve_healer_k8s_eskalasi_total"),
+        node_failures=_counters(samples, "pve_healer_node_gagal_total"),
+    )
+
+
+def normalize_pending(raw: Any, now: float | None = None) -> list[PendingApproval]:
+    if not isinstance(raw, list):
+        return []
+    now = time.time() if now is None else now
+    pending: list[PendingApproval] = []
+    for record in raw:
+        if not isinstance(record, dict):
+            continue
+        try:
+            vmid = int(record.get("vmid")) if record.get("vmid") not in (None, "") else None
+        except (TypeError, ValueError):
+            vmid = None
+        expires = record.get("kedaluwarsa")
+        seconds_left: int | None = None
+        try:
+            seconds_left = max(0, round(float(expires) - now))
+        except (TypeError, ValueError):
+            pass
+        approved_at = record.get("disetujui")
+        pending.append(
+            PendingApproval(
+                vmid=vmid,
+                nama=str(record.get("nama") or ""),
+                node=str(record.get("node") or ""),
+                jenis=str(record.get("jenis") or ""),
+                jenis_guest=str(record.get("jenis_guest") or ""),
+                status=str(record.get("status") or ""),
+                aksi=str(record.get("aksi") or ""),
+                sumber=str(record.get("sumber") or ""),
+                alasan=str(record.get("alasan") or ""),
+                diminta=epoch_iso(record.get("diminta")),
+                kedaluwarsa=epoch_iso(expires),
+                seconds_left=seconds_left,
+                approved=bool(approved_at),
+                approved_at=epoch_iso(approved_at),
+                oleh=str(record.get("oleh") or ""),
+            )
+        )
+    pending.sort(key=lambda item: item.vmid if item.vmid is not None else 0)
+    return pending
+
+
+PUSH_ALERT_PREFIXES = ("PveHealer", "Healer", "SreHealer")
+
+
+def normalize_pushed_alerts(raw: Any) -> list[PushedAlert]:
+    """Alerts posted directly to Alertmanager; Prometheus ALERTS cannot see these."""
+    if not isinstance(raw, list):
+        return []
+    pushed: list[PushedAlert] = []
+    for record in raw:
+        if not isinstance(record, dict):
+            continue
+        labels = {str(key): str(value) for key, value in (record.get("labels") or {}).items()}
+        name = labels.get("alertname", "")
+        if not name:
+            continue
+        if not (name.startswith(PUSH_ALERT_PREFIXES) or "dry_run" in labels):
+            continue
+        annotations = record.get("annotations") or {}
+        status = record.get("status") or {}
+        pushed.append(
+            PushedAlert(
+                alertname=name,
+                severity=str(labels.get("severity") or "warning"),
+                status=str(status.get("state") or "active"),
+                summary=str(annotations.get("summary") or ""),
+                description=str(annotations.get("description") or ""),
+                starts_at=to_iso(str(record.get("startsAt") or "")),
+                ends_at=to_iso(str(record.get("endsAt") or "")),
+                fingerprint=str(record.get("fingerprint") or ""),
+                labels=labels,
+            )
+        )
+    pushed.sort(key=lambda item: parse_ts(item.starts_at) or datetime.min.replace(tzinfo=UTC), reverse=True)
+    return pushed
+
+
+def normalize_engine_decisions(raw: Any) -> list[EngineDecision]:
+    if not isinstance(raw, list):
+        return []
+    decisions: list[EngineDecision] = []
+    for record in raw:
+        if not isinstance(record, dict):
+            continue
+        ts = epoch_iso(record.get("ts")) or str(record.get("ts") or "")
+        confidence = record.get("confidence")
+        decisions.append(
+            EngineDecision(
+                ts=ts,
+                time=hhmm(ts),
+                jenis=str(record.get("jenis") or ""),
+                target=str(record.get("sasaran") or record.get("target") or ""),
+                kelas=str(record.get("kelas") or ""),
+                keterangan=str(record.get("keterangan") or ""),
+                confidence=float(confidence) if isinstance(confidence, (int, float)) else None,
+                aksi=str(record.get("aksi") or ""),
+                hasil=str(record.get("hasil_aksi") or ""),
+                dry_run=bool(record.get("dry_run")),
+                error=str(record.get("error") or ""),
+            )
+        )
+    decisions.reverse()  # sre-healer returns oldest -> newest
+    return decisions
+
+
+def _classifier_health(result: ProbeResult, configured: bool) -> ClassifierHealth:
+    if not configured:
+        return ClassifierHealth()
+    model = ""
+    if result.ok and isinstance(result.value, dict):
+        model = str(result.value.get("model") or "")
+    return ClassifierHealth(
+        configured=True, ok=result.ok, model=model, ms=result.ms, error=result.error
+    )
+
+
+def _engine_healer(
+    health: ProbeResult | None,
+    decisions: ProbeResult | None,
+    configured: bool,
+) -> EngineHealer:
+    if not configured or health is None:
+        return EngineHealer()
+    recent = normalize_engine_decisions(decisions.value) if decisions and decisions.ok else []
+    return EngineHealer(
+        configured=True,
+        ok=health.ok,
+        ms=health.ms,
+        error=health.error or (decisions.error if decisions and not decisions.ok else None),
+        decisions=recent,
     )
 
 
 # -------------------------------------------------------------------- runbooks
 
 RUNBOOKS: list[dict[str, Any]] = [
+    {
+        "test": r"^PveHealerApproval$",
+        "note": "Aksi menunggu persetujuan manusia. Read-only: setujui hanya dari VM105 lewat CLI.",
+        "lines": [
+            "ssh root@10.10.0.107 'python3 /opt/proxmox-healer/healer.py --pending'",
+            "ssh root@10.10.0.107 'python3 /opt/proxmox-healer/healer.py --approve <vmid>'",
+            "curl -s http://10.10.0.107:9181/api/pending | jq .",
+        ],
+    },
+    {
+        "test": r"^(PveHealerEscalation|PveHealerAksiGagal|PveHealerK8s)$",
+        "note": "Healer sudah mencoba atau menolak bertindak; insiden butuh manusia. Cek decisions terbaru.",
+        "lines": [
+            "ssh root@10.10.0.107 'tail -n 20 /var/lib/proxmox-healer/decisions.jsonl | jq .'",
+            "ssh root@10.10.0.107 'systemctl status proxmox-healer --no-pager'",
+            "curl -s http://10.10.0.107:9181/api/knobs | jq .",
+        ],
+    },
+    {
+        "test": r"^PveHealerDown$",
+        "note": "Metrik healer Proxmox tidak sampai ke Prometheus.",
+        "lines": [
+            "ssh root@10.10.0.107 'systemctl status proxmox-healer --no-pager'",
+            "ssh root@10.10.0.107 'journalctl -u proxmox-healer -n 40 --no-pager'",
+            "curl -s http://10.10.0.107:9181/metrics | head",
+        ],
+    },
+    {
+        "test": r"^(HealerDown|HealerClassifierPutus|HealerAksiGagal|HealerLoopLambat|HealerBanyakEskalasi|HealerErrorLoop|NodeBermasalah)$",
+        "note": "Alert dari sre-healer k8s. Cek /decisions dan /metrics runtime tersebut.",
+        "lines": [
+            "kubectl -n sre-healer get deploy,pods",
+            "kubectl -n sre-healer logs deploy/sre-healer --tail=80",
+            "kubectl -n sre-healer port-forward deploy/sre-healer 8080:8080  # lalu curl :8080/decisions",
+        ],
+    },
+    {
+        "test": r"^(NodeExporterDown|ProxmoxHostDown)$",
+        "note": "Target Proxmox/node-exporter mati. Cek guest dan jalur scrape sebelum menyentuh healer.",
+        "lines": [
+            "ssh root@10.10.0.107 'tail -n 40 /var/log/dns-broker.log 2>/dev/null || true'",
+            "curl -s http://10.10.0.107:9090/api/v1/targets | jq '.data.activeTargets[] | select(.health==\"down\") | {labels,lastError}'",
+            "ssh root@10.10.0.4 'qm status <vmid>'",
+        ],
+    },
+    {
+        "test": r"^(K3sNodeNotReady|K3sApiDown|ExternalPrometheusDown)$",
+        "note": "Jalur monitoring k3s/eksternal terganggu; alert healer bisa jadi tidak lengkap.",
+        "lines": [
+            "kubectl get nodes -o wide",
+            "kubectl -n monitoring get pods",
+            "curl -s http://10.10.0.107:9090/-/ready",
+        ],
+    },
     {
         "test": r"^InfraSubdomainDead$",
         "note": "Exporter hostname/lease broker: verify the lease timer and the broker record for the exporter host.",
@@ -378,35 +669,54 @@ async def _gather(probes: dict[str, Awaitable[ProbeResult]]) -> dict[str, ProbeR
     return out
 
 
+def _endpoint_detail(result: ProbeResult) -> str | None:
+    if result.name == "classifier_health" and result.ok and isinstance(result.value, dict):
+        return str(result.value.get("model") or "") or None
+    return None
+
+
 def _endpoints(results: dict[str, ProbeResult]) -> list[SourceStatus]:
     return [
-        SourceStatus(name=result.name, url=result.url, ok=result.ok, ms=result.ms, error=result.error)
+        SourceStatus(
+            name=result.name,
+            url=result.url,
+            ok=result.ok,
+            ms=result.ms,
+            error=result.error,
+            detail=_endpoint_detail(result),
+        )
         for result in results.values()
     ]
 
 
 async def gather_overview(upstream: Upstream, settings: Settings) -> Overview:
-    results = await _gather(
-        {
-            "summary": upstream.healer("summary", "/api/summary"),
-            "state": upstream.healer("state", "/api/state"),
-            "decisions": upstream.healer("decisions", "/api/decisions?n=200"),
-            "knobs": upstream.healer("knobs", "/api/knobs"),
-            "metrics": upstream.healer_text("metrics", "/metrics"),
-            "alerts": upstream.prom("alerts", PROM_ALERTS),
-            "alert_age": upstream.prom("alert_age", PROM_ALERT_AGE),
-            "jobs": upstream.prom("jobs", PROM_JOBS),
-            "jobs_down": upstream.prom("jobs_down", PROM_JOBS_DOWN),
-            "prometheus_ready": upstream.ready("prometheus_ready", settings.prometheus_base),
-            "alertmanager_ready": upstream.ready("alertmanager_ready", settings.alertmanager_base),
-            "grafana_health": upstream.grafana_health(),
-        }
-    )
+    probes: dict[str, Awaitable[ProbeResult]] = {
+        "summary": upstream.healer("summary", "/api/summary"),
+        "state": upstream.healer("state", "/api/state"),
+        "decisions": upstream.healer("decisions", "/api/decisions?n=200"),
+        "knobs": upstream.healer("knobs", "/api/knobs"),
+        "metrics": upstream.healer_text("metrics", "/metrics"),
+        "alerts": upstream.prom("alerts", PROM_ALERTS),
+        "alert_age": upstream.prom("alert_age", PROM_ALERT_AGE),
+        "jobs": upstream.prom("jobs", PROM_JOBS),
+        "jobs_down": upstream.prom("jobs_down", PROM_JOBS_DOWN),
+        "prometheus_ready": upstream.ready("prometheus_ready", settings.prometheus_base),
+        "alertmanager_ready": upstream.ready("alertmanager_ready", settings.alertmanager_base),
+        "grafana_health": upstream.grafana_health(),
+        "push_alerts": upstream.alertmanager_alerts(),
+    }
+    if settings.classifier_base:
+        probes["classifier_health"] = upstream.classifier_health()
+    if settings.engine_healer_base:
+        probes["engine_healer_health"] = upstream.engine_healer_health()
+    results = await _gather(probes)
     decisions = normalize_decisions(results["decisions"].value if results["decisions"].ok else [])
     summary = parse_summary(results["summary"].value if results["summary"].ok else None)
     alerts = normalize_alerts(
         results["alerts"].value if results["alerts"].ok else None,
         results["alert_age"].value if results["alert_age"].ok else None,
+        results["push_alerts"].value if results["push_alerts"].ok else None,
+        results["push_alerts"].ok,
     )
     jobs = normalize_jobs(
         results["jobs"].value if results["jobs"].ok else None,
@@ -477,11 +787,14 @@ async def gather_alerts(upstream: Upstream, settings: Settings) -> AlertsRespons
         {
             "alerts": upstream.prom("alerts", PROM_ALERTS),
             "alert_age": upstream.prom("alert_age", PROM_ALERT_AGE),
+            "push_alerts": upstream.alertmanager_alerts(),
         }
     )
     alerts = normalize_alerts(
         results["alerts"].value if results["alerts"].ok else None,
         results["alert_age"].value if results["alert_age"].ok else None,
+        results["push_alerts"].value if results["push_alerts"].ok else None,
+        results["push_alerts"].ok,
     )
     return AlertsResponse(
         generated_at=now_iso(),
@@ -490,25 +803,58 @@ async def gather_alerts(upstream: Upstream, settings: Settings) -> AlertsRespons
         counts=alerts.counts,
         groups=alerts.groups,
         links=settings.links,
+        pushed=alerts.pushed,
+        pushed_ok=alerts.pushed_ok,
     )
 
 
-async def gather_knobs(upstream: Upstream) -> KnobsResponse:
-    results = await _gather(
-        {
-            "knobs": upstream.healer("knobs", "/api/knobs"),
-            "summary": upstream.healer("summary", "/api/summary"),
-            "metrics": upstream.healer_text("metrics", "/metrics"),
-            "decisions": upstream.healer("decisions", "/api/decisions?n=1"),
-        }
-    )
+async def gather_knobs(upstream: Upstream, settings: Settings) -> KnobsResponse:
+    classifier_configured = bool(settings.classifier_base)
+    engine_configured = bool(settings.engine_healer_base)
+    probes: dict[str, Awaitable[ProbeResult]] = {
+        "knobs": upstream.healer("knobs", "/api/knobs"),
+        "summary": upstream.healer("summary", "/api/summary"),
+        "metrics": upstream.healer_text("metrics", "/metrics"),
+        "decisions": upstream.healer("decisions", "/api/decisions?n=1"),
+        "pending": upstream.healer("pending", "/api/pending"),
+    }
+    if classifier_configured:
+        probes["classifier_health"] = upstream.classifier_health()
+    if engine_configured:
+        probes["engine_healer_health"] = upstream.engine_healer_health()
+        probes["engine_healer_decisions"] = upstream.engine_healer_decisions()
+    results = await _gather(probes)
     decisions = normalize_decisions(results["decisions"].value if results["decisions"].ok else [])
+    pending = normalize_pending(results["pending"].value if results["pending"].ok else [])
+    classifier = (
+        _classifier_health(results["classifier_health"], True)
+        if classifier_configured
+        else ClassifierHealth()
+    )
+    engine = _engine_healer(
+        results.get("engine_healer_health"),
+        results.get("engine_healer_decisions"),
+        engine_configured,
+    )
     return KnobsResponse(
         generated_at=now_iso(),
+        links=settings.links,
         knobs=results["knobs"].value if results["knobs"].ok and isinstance(results["knobs"].value, dict) else {},
         metrics=parse_metrics(results["metrics"].value if results["metrics"].ok else None),
         last_decision=decisions[0] if decisions else None,
         summary=parse_summary(results["summary"].value if results["summary"].ok else None),
+        pending=pending,
+        pending_ok=results["pending"].ok,
+        classifier=classifier,
+        engine=engine,
+    )
+
+
+async def gather_pending(upstream: Upstream) -> PendingResponse:
+    result = await upstream.healer("pending", "/api/pending")
+    pending = normalize_pending(result.value if result.ok else [])
+    return PendingResponse(
+        generated_at=now_iso(), ok=result.ok, count=len(pending), pending=pending
     )
 
 
@@ -531,8 +877,12 @@ async def gather_raw(upstream: Upstream, sources: set[str]) -> dict[str, Any]:
         probes["decisions"] = upstream.healer("decisions", "/api/decisions?n=100")
     if "metrics" in sources:
         probes["metrics"] = upstream.healer_text("metrics", "/metrics")
+    if "pending" in sources:
+        probes["pending"] = upstream.healer("pending", "/api/pending")
     if "alerts" in sources:
         probes["alerts"] = upstream.prom("alerts", PROM_ALERTS)
+    if "push_alerts" in sources:
+        probes["push_alerts"] = upstream.alertmanager_alerts()
     if "jobs" in sources:
         probes["jobs"] = upstream.prom("jobs", PROM_JOBS)
     results = await _gather(probes)

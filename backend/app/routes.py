@@ -10,6 +10,7 @@ from .aggregate import (
     gather_guests,
     gather_knobs,
     gather_overview,
+    gather_pending,
     gather_raw,
     gather_status,
 )
@@ -20,12 +21,23 @@ from .schemas import (
     GuestsResponse,
     KnobsResponse,
     Overview,
+    PendingResponse,
     Status,
 )
 
 router = APIRouter(prefix="/api", tags=["plane"], dependencies=[Depends(require_user)])
 
-RAW_SOURCES = {"summary", "state", "knobs", "decisions", "metrics", "alerts", "jobs"}
+RAW_SOURCES = {
+    "summary",
+    "state",
+    "knobs",
+    "decisions",
+    "metrics",
+    "pending",
+    "alerts",
+    "push_alerts",
+    "jobs",
+}
 
 
 def _cache(request: Request):
@@ -77,7 +89,16 @@ async def knobs(request: Request) -> KnobsResponse:
     return await _cache(request).get_or_create(
         "knobs",
         _ttl(request),
-        lambda: gather_knobs(request.app.state.upstream),
+        lambda: gather_knobs(request.app.state.upstream, request.app.state.settings),
+    )
+
+
+@router.get("/pending", response_model=PendingResponse)
+async def pending(request: Request) -> PendingResponse:
+    return await _cache(request).get_or_create(
+        "pending",
+        _ttl(request),
+        lambda: gather_pending(request.app.state.upstream),
     )
 
 

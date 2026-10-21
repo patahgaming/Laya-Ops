@@ -6,7 +6,7 @@ import { useApi } from "../hooks/useApi";
 import { useRefresh } from "../state/refresh";
 import { useToast } from "../state/toast";
 
-const SOURCES = "summary,state,knobs,decisions,alerts,jobs";
+const SOURCES = "summary,state,knobs,decisions,metrics,pending,alerts,push_alerts,jobs";
 
 export function RawPage() {
   const { data, error, loading } = useApi<RawResponse>(`/api/raw?sources=${SOURCES}`, 30_000);
