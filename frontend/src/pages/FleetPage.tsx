@@ -5,15 +5,25 @@ import { CopyButton, Empty, ErrorState, PageHead, Panel, Pill } from "../compone
 import { guestLabel, timeOf } from "../data/format";
 import type { Guest, GuestsResponse } from "../data/types";
 import { useApi } from "../hooks/useApi";
+import { useAuth } from "../state/auth";
 import { useRefresh } from "../state/refresh";
 
 const PAGE_SIZE = 12;
-const NODE_TONE: Record<string, string> = { hq1: "mint", hq2: "blue", hq3: "violet" };
+const NODE_TONES = ["mint", "blue", "violet", "amber"];
 type StatusFilter = "all" | "running" | "stopped" | "agent-ok" | "agent-silent";
+
+function nodeTone(node: string): string {
+  let hash = 0;
+  for (const char of node) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return NODE_TONES[hash % NODE_TONES.length];
+}
 
 export function FleetPage() {
   const { data, error, loading } = useApi<GuestsResponse>("/api/guests", 20_000);
+  const { info } = useAuth();
   const { refresh } = useRefresh();
+  const plane = info?.plane;
+  const ssh = plane ? `${plane.ssh_user}@${plane.host}` : "root@host";
   const [nodeFilter, setNodeFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [query, setQuery] = useState("");
@@ -47,7 +57,7 @@ export function FleetPage() {
   const resetPage = () => setPage(1);
   const closeDrawer = () => setActive(null);
   const inspectCommand = active
-    ? `ssh root@10.10.0.107 'qm status ${active.vmid} || pct status ${active.vmid}'`
+    ? `ssh ${ssh} 'qm status ${active.vmid} || pct status ${active.vmid}'`
     : "";
 
   return (
@@ -180,7 +190,7 @@ export function FleetPage() {
                     <td className="cell-id">#{guest.vmid}</td>
                     <td>
                       <div className="cell-agent">
-                        <span className={`agent-avatar ${NODE_TONE[guest.node] ?? "mint"}`}>
+                        <span className={`agent-avatar ${nodeTone(guest.node)}`}>
                           <Icon name="i-box" />
                         </span>
                         <div>
@@ -278,7 +288,7 @@ export function FleetPage() {
           {active ? (
             <>
               <div className="drawer-hero">
-                <span className={`agent-avatar ${NODE_TONE[active.node] ?? "mint"}`}>
+                <span className={`agent-avatar ${nodeTone(active.node)}`}>
                   <Icon name="i-box" />
                 </span>
                 <div>

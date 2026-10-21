@@ -5,12 +5,12 @@ import { Icon } from "../components/Icon";
 import { useAuth } from "../state/auth";
 
 const SATELLITES = [
-  { tone: "s-orange", icon: "i-torch", radius: 136, angle: -96, title: "Prometheus" },
-  { tone: "s-amber", icon: "i-flame", radius: 136, angle: 24, title: "Grafana" },
-  { tone: "s-orange", icon: "i-bell", radius: 136, angle: 144, title: "Alertmanager" },
-  { tone: "s-violet", icon: "i-box", radius: 192, angle: -36, title: "Proxmox" },
-  { tone: "s-blue", icon: "i-wheel", radius: 192, angle: 100, title: "k3s" },
-  { tone: "s-coral", icon: "i-key", radius: 192, angle: 208, title: "Keycloak" }
+  { tone: "s-orange", icon: "i-torch", radius: 136, angle: -96 },
+  { tone: "s-amber", icon: "i-flame", radius: 136, angle: 24 },
+  { tone: "s-orange", icon: "i-bell", radius: 136, angle: 144 },
+  { tone: "s-violet", icon: "i-box", radius: 192, angle: -36 },
+  { tone: "s-blue", icon: "i-wheel", radius: 192, angle: 100 },
+  { tone: "s-coral", icon: "i-key", radius: 192, angle: 208 }
 ];
 
 export function LoginPage() {
@@ -51,6 +51,7 @@ export function LoginPage() {
 
   const passwordMode = info?.mode === "password";
   const oidcMode = info?.mode === "oidc";
+  const plane = info?.plane;
 
   return (
     <div className="auth-page">
@@ -64,11 +65,9 @@ export function LoginPage() {
           </span>
         </a>
         <div className="status-chip">
-          <span className="dot mint pulse" /> read-only console <b>VM105</b>
+          <span className="dot mint pulse" /> read-only console
+          {plane?.name ? <b>{plane.name}</b> : null}
         </div>
-        <a className="docs" href="https://github.com" target="_blank" rel="noreferrer">
-          Docs <Icon name="i-arrow-up-right" className="icon sm" />
-        </a>
       </header>
 
       <main className="auth-stage">
@@ -145,24 +144,26 @@ export function LoginPage() {
                 <span className="k">session</span>
                 <span className="v">8h · HttpOnly</span>
               </div>
-              <div>
-                <span className="k">plane</span>
-                <span className="v">VM105 · :9181</span>
-              </div>
             </div>
 
             <div className="auth-note">
               <Icon name="i-shield" />
               <span>
                 Console ini read-only: tidak ada endpoint aksi, ack, atau silence. Tindakan hanya lewat
-                loop healer / SSH. Session 8 jam, cookie HttpOnly.
+                loop healer / SSH.
               </span>
             </div>
           </div>
 
           <div className="auth-visual" aria-hidden="true">
             <div className="visual-head">
-              <span className="dot mint" /> Monitoring plane <span className="right mono">hq1 · vm105</span>
+              <span className="dot mint" /> Monitoring plane
+              {plane ? (
+                <span className="right mono">
+                  {plane.site}
+                  {plane.name ? ` · ${plane.name.toLowerCase()}` : ""}
+                </span>
+              ) : null}
             </div>
 
             <div className="orbit">
@@ -173,9 +174,8 @@ export function LoginPage() {
               </div>
               {SATELLITES.map((satellite) => (
                 <div
-                  key={satellite.title}
+                  key={satellite.icon}
                   className={`sat ${satellite.tone}`}
-                  title={satellite.title}
                   style={
                     {
                       "--r": `${satellite.radius}px`,
@@ -189,23 +189,6 @@ export function LoginPage() {
             </div>
 
             <div className="visual-foot">
-              <div className="visual-stats">
-                <span className="stat">
-                  <span className="dot mint" /> plane <b>read-only</b>
-                </span>
-                <span className="sep">|</span>
-                <span className="stat">
-                  healer <b>:9181</b>
-                </span>
-                <span className="sep">|</span>
-                <span className="stat">
-                  prom <b>:9090</b>
-                </span>
-                <span className="sep">|</span>
-                <span className="stat">
-                  grafana <b>:3000</b>
-                </span>
-              </div>
               <div className="visual-caption">
                 <span className="dot" /> prometheus <span className="dot" /> grafana <span className="dot" />{" "}
                 alertmanager <span className="dot" /> proxmox <span className="dot" /> k3s <span className="dot" />{" "}
@@ -217,10 +200,10 @@ export function LoginPage() {
       </main>
 
       <footer className="auth-foot">
-        <span>© 2026 Laya Ops · internal tooling</span>
+        <span>© 2026 {info?.app_name ?? "Laya Ops"} · internal tooling</span>
         <span className="right">
-          <span>hq1 · VM105 · 10.10.0.107</span>
-          <span>build 1.0.0</span>
+          {plane ? <span>{[plane.site, plane.name, plane.host].filter(Boolean).join(" · ")}</span> : null}
+          {info?.app_version ? <span>build {info.app_version}</span> : null}
         </span>
       </footer>
     </div>

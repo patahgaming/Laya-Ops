@@ -12,6 +12,12 @@ class Settings(BaseSettings):
     app_name: str = "Laya Ops"
     app_version: str = "1.0.0"
 
+    # plane identity shown by the UI (also used for the SSH helper commands)
+    plane_name: str = "VM105"
+    plane_site: str = "hq1"
+    plane_host: str = "10.10.0.107"
+    plane_ssh_user: str = "root"
+
     # upstread services, reachable from the backend host (VM105: all localhost)
     healer_base: str = "http://127.0.0.1:9181"
     prometheus_base: str = "http://127.0.0.1:9090"

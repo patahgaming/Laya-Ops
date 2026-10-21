@@ -39,7 +39,7 @@ export function RawPage() {
 
       <Panel
         title="Upstream payload"
-        sub={data ? `${names.length} sources · fetch terakhir ${new Date().toLocaleTimeString()}` : "memuat payload…"}
+        sub={data ? `${names.length} sources · read-only` : "memuat payload…"}
         right={<Pill>read-only</Pill>}
       >
         {loading && !data ? (
@@ -62,7 +62,10 @@ export function RawPage() {
                   >
                     {name}
                     {source ? (
-                      <span className={source.ok ? "tiny" : "tiny"} style={{ marginLeft: 6, color: source.ok ? "var(--mint)" : "var(--coral)" }}>
+                      <span
+                        className="tiny"
+                        style={{ marginLeft: 6, color: source.ok ? "var(--mint)" : "var(--coral)" }}
+                      >
                         {source.ok ? `${source.ms}ms` : "fail"}
                       </span>
                     ) : null}

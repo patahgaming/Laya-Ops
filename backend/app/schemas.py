@@ -157,11 +157,21 @@ class DecisionsResponse(BaseModel):
     decisions: list[Decision] = Field(default_factory=list)
 
 
+class PlaneInfo(BaseModel):
+    name: str = ""
+    site: str = ""
+    host: str = ""
+    ssh_user: str = "root"
+
+
 class AuthInfo(BaseModel):
     mode: Literal["off", "password", "oidc"]
     user: dict[str, str] | None = None
     provider: str = "None"
     login_url: str | None = None
+    app_name: str = ""
+    app_version: str = ""
+    plane: PlaneInfo = Field(default_factory=PlaneInfo)
 
 
 class LoginRequest(BaseModel):

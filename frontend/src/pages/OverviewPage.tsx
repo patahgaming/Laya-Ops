@@ -15,15 +15,21 @@ import {
 import { hourlyBuckets, jobIcon, resultTone, timeOf } from "../data/format";
 import type { Overview } from "../data/types";
 import { useApi } from "../hooks/useApi";
+import { useAuth } from "../state/auth";
 import { useRefresh } from "../state/refresh";
 
 export function OverviewPage() {
   const { data, error, loading } = useApi<Overview>("/api/overview", 15_000);
+  const { info } = useAuth();
   const { refresh } = useRefresh();
+  const plane = info?.plane;
+  const eyebrow = plane
+    ? `Live plane · ${[plane.site, plane.host].filter(Boolean).join(" · ")}`
+    : "Live plane";
 
   const head = (
     <PageHead
-      eyebrow="Live plane · hq1 · 10.10.0.107"
+      eyebrow={eyebrow}
       title="Plane overview"
       sub="Real state dari healer API, Prometheus dan Proxmox — termasuk keputusan yang sengaja tidak diambil."
       actions={
@@ -145,7 +151,6 @@ export function OverviewPage() {
           </div>
           <div className="banner-body">
             <div className="banner-title">Plane nominal — tidak ada alert firing</div>
-            <div className="banner-sub">Watchdog tetap firing sebagai bukti jalur Alertmanager hidup.</div>
           </div>
         </div>
       )}
@@ -236,7 +241,7 @@ export function OverviewPage() {
       <div className="grid grid-2">
         <Panel
           title="Scrape jobs"
-          sub="from Prometheus · count by (job) (up)"
+          sub="Prometheus"
           right={<Pill>{data.jobs.length} jobs</Pill>}
         >
           <div className="comp-list">
@@ -284,11 +289,14 @@ export function OverviewPage() {
 
         <Panel
           title="Healer decisions"
-          sub="decisions.jsonl · terbaru di atas"
+          sub="terbaru di atas"
           right={
-            <Link className="panel-link" to="/raw">
-              Raw <Icon name="i-arrow-right" className="icon sm" />
-            </Link>
+            <>
+              <Pill>{data.decisions.length} recent</Pill>
+              <Link className="panel-link" to="/raw">
+                Raw <Icon name="i-arrow-right" className="icon sm" />
+              </Link>
+            </>
           }
         >
           <div className="decisions">
@@ -313,14 +321,6 @@ export function OverviewPage() {
                 </div>
               ))
             )}
-          </div>
-          <div className="panel-sep" />
-          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 18px" }}>
-            <span className="tiny dim">log file</span>
-            <span className="mono tiny dim">/var/lib/proxmox-healer/decisions.jsonl</span>
-            <span className="pill neutral" style={{ marginLeft: "auto" }}>
-              {data.decisions.length} recent
-            </span>
           </div>
         </Panel>
       </div>
@@ -353,7 +353,7 @@ export function OverviewPage() {
 
         <Panel
           title="API endpoints"
-          sub="read-only · diukur saat halaman dimuat"
+          sub="read-only"
           right={
             <a className="panel-link" href={data.links.grafana} target="_blank" rel="noreferrer">
               Grafana <Icon name="i-arrow-up-right" className="icon sm" />
@@ -362,16 +362,6 @@ export function OverviewPage() {
         >
           <div className="checks">
             <EndpointList endpoints={data.endpoints} />
-            <div className="check" style={{ background: "rgba(255,255,255,.015)" }}>
-              <span className="check-ico tone-amber">
-                <Icon name="i-info" />
-              </span>
-              <div className="check-main">
-                <div className="check-name">Grafana tidak di-query dari browser</div>
-                <div className="check-val">admin API butuh kredensial · buka dashboard langsung</div>
-              </div>
-              <Pill tone="neutral">link</Pill>
-            </div>
           </div>
         </Panel>
       </div>

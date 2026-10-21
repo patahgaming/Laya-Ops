@@ -19,6 +19,33 @@ def test_auth_off_exposes_anonymous(password_client):
     info = anonymous.get("/api/auth/config").json()
     assert info["mode"] == "off"
     assert info["user"]["name"] == "anonymous"
+    assert info["app_name"] == "Laya Ops"
+    assert info["app_version"] == "1.0.0"
+    assert info["plane"] == {
+        "name": "VM105",
+        "site": "hq1",
+        "host": "10.10.0.107",
+        "ssh_user": "root",
+    }
+
+
+def test_auth_config_uses_plane_settings():
+    app = create_app(
+        build_settings(
+            plane_name="lab-01",
+            plane_site="lab",
+            plane_host="192.0.2.10",
+            plane_ssh_user="ops",
+        )
+    )
+    with TestClient(app) as client:
+        config = client.get("/api/auth/config").json()
+    assert config["plane"] == {
+        "name": "lab-01",
+        "site": "lab",
+        "host": "192.0.2.10",
+        "ssh_user": "ops",
+    }
 
 
 def test_password_login_protects_api(password_client):
