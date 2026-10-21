@@ -4,6 +4,15 @@ export interface AuthUserInfo {
   name: string;
   email?: string;
   method?: string;
+  sub?: string;
+  groups?: string[];
+}
+
+export interface FeatureFlags {
+  goals: boolean;
+  goals_execute: boolean;
+  goals_llm: boolean;
+  password_single_person: boolean;
 }
 
 export interface PlaneInfo {
@@ -21,6 +30,9 @@ export interface AuthInfo {
   app_name: string;
   app_version: string;
   plane: PlaneInfo;
+  csrf_token: string;
+  features: FeatureFlags;
+  can_approve: boolean;
 }
 
 export interface SourceStatus {
@@ -47,6 +59,7 @@ export interface Summary {
   aksi_24h: number;
   pulih_24h: number;
   eskalasi_24h: number;
+  goal_24h: number;
   menunggu_persetujuan: number;
   dry: boolean;
   targets: Targets;
@@ -303,4 +316,180 @@ export interface HourBucket {
   label: string;
   total: number;
   escalated: number;
+}
+
+/* ---------- AI goals ---------- */
+
+export type GoalStatus =
+  | "pending_approval"
+  | "approved"
+  | "dispatching"
+  | "executing"
+  | "succeeded"
+  | "failed"
+  | "unknown"
+  | "rejected"
+  | "cancelled"
+  | "expired";
+
+export type GoalAction = "start" | "resume" | "reset" | "noop" | "escalate";
+export type GoalRisk = "low" | "medium" | "high";
+
+export interface GoalTemplateVariable {
+  name: string;
+  type: string;
+  required: boolean;
+  max_length: number | null;
+  enum: string[];
+  default: unknown;
+  description: string;
+}
+
+export interface ManualGoalSecret {
+  name: string;
+  description: string;
+}
+
+export interface GoalTemplate {
+  id: string;
+  version: string;
+  name: string;
+  description: string;
+  target_kind: string;
+  actions: string[];
+  max_steps: number;
+  variables: GoalTemplateVariable[];
+  manual_secrets: ManualGoalSecret[];
+  execution_enabled: boolean;
+}
+
+export interface GoalTemplatesResponse {
+  templates: GoalTemplate[];
+}
+
+export interface GoalPlanTarget {
+  vmid: number;
+  name: string;
+  node: string;
+  guest_type: "vm" | "ct";
+  status: string;
+}
+
+export interface GoalPlanStep {
+  step_id: string;
+  action: GoalAction;
+  target: GoalPlanTarget;
+  params: Record<string, unknown>;
+  expected_effect: string;
+  risk: GoalRisk;
+  requires_approval: boolean;
+}
+
+export interface GoalPlan {
+  template_id: string;
+  template_version: string;
+  goal: string;
+  target: GoalPlanTarget;
+  variables: Record<string, unknown>;
+  steps: GoalPlanStep[];
+  rationale: string;
+  warnings: string[];
+  generated_by: "rules" | "llm";
+  evidence_hash: string;
+}
+
+export interface GoalTargetSummary {
+  vmid?: number;
+  name?: string;
+  node?: string;
+  guest_type?: string;
+  status?: string;
+  auto?: boolean;
+}
+
+export interface GoalPreviewResponse {
+  preview_id: string;
+  status: "ready" | "needs_input" | "blocked";
+  plan: GoalPlan;
+  plan_hash: string;
+  warnings: string[];
+  missing: string[];
+  blocked_reason: string;
+  expires_at: string;
+}
+
+export interface ApprovalRequirements {
+  approval_code: boolean;
+  confirm: boolean;
+  high_risk: boolean;
+  passphrase_required: boolean;
+  typed_confirmation: string;
+}
+
+export interface GoalView {
+  id: string;
+  status: GoalStatus;
+  template_id: string;
+  template_version: string;
+  target: GoalTargetSummary;
+  goal: string;
+  variables: Record<string, unknown>;
+  plan: GoalPlan;
+  plan_hash: string;
+  evidence_hash: string;
+  warnings: string[];
+  requested_by: string;
+  requested_by_sub: string;
+  requested_at: string;
+  expires_at: string;
+  approved_by: string;
+  approved_at: string;
+  rejected_by: string;
+  rejected_at: string;
+  reject_reason: string;
+  execute_before: string;
+  run: Record<string, unknown> | null;
+  result: Record<string, unknown> | null;
+  error: string;
+  created_at: string;
+  updated_at: string;
+  can_approve: boolean;
+  can_execute: boolean;
+  approval_mode: string;
+  execution_enabled: boolean;
+  high_risk: boolean;
+  requirements: ApprovalRequirements;
+}
+
+export interface GoalCreated extends GoalView {
+  approval_code: string | null;
+  idempotent_replay: boolean;
+}
+
+export interface GoalListResponse {
+  goals: GoalView[];
+  next_cursor: string | null;
+}
+
+export interface GoalAuditEntry {
+  ts: string;
+  goal_id: string;
+  actor: string;
+  actor_sub: string;
+  actor_method: string;
+  event: string;
+  detail: Record<string, unknown>;
+  client_ip: string;
+  user_agent: string;
+}
+
+export interface GoalAuditResponse {
+  goal_id: string;
+  events: GoalAuditEntry[];
+}
+
+export interface GoalActionResponse {
+  ok: boolean;
+  goal: GoalView;
+  message: string;
 }

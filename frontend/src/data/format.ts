@@ -12,6 +12,15 @@ export function timeOf(value?: string | null): string {
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
+export function dateTimeOf(value?: string | null): string {
+  const date = parseTs(value);
+  if (!date) return "—";
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(
+    date.getHours()
+  )}:${pad(date.getMinutes())}`;
+}
+
 export function clockOf(date: Date): string {
   return [date.getHours(), date.getMinutes(), date.getSeconds()]
     .map((part) => String(part).padStart(2, "0"))

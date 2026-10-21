@@ -10,11 +10,31 @@ export class ApiError extends Error {
   }
 }
 
+const UNSAFE = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+/** Session-bound CSRF token. Kept in memory only; never localStorage. */
+let csrfToken = "";
+
+export function setCsrfToken(token: string | null | undefined): void {
+  csrfToken = token ?? "";
+}
+
+export function getCsrfToken(): string {
+  return csrfToken;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const { headers, ...rest } = init ?? {};
+  const method = (init?.method ?? "GET").toUpperCase();
+  const merged: Record<string, string> = {
+    Accept: "application/json",
+    ...(headers as Record<string, string> | undefined)
+  };
+  if (UNSAFE.has(method) && csrfToken) merged["X-CSRF-Token"] = csrfToken;
   const response = await fetch(path, {
     credentials: "same-origin",
-    headers: { Accept: "application/json", ...(init?.headers ?? {}) },
-    ...init
+    ...rest,
+    headers: merged
   });
   if (!response.ok) {
     let detail = response.statusText;

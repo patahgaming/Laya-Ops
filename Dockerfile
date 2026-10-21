@@ -16,6 +16,9 @@ COPY backend/requirements.txt /app/backend/requirements.txt
 RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 COPY backend/app /app/backend/app
 COPY --from=frontend /build/frontend/dist /app/frontend/dist
+# AI Goals SQLite + audit live here. Compose mounts a named volume over it so
+# approvals and audit survive container rebuilds.
+RUN mkdir -p /app/data && chmod 700 /app/data
 WORKDIR /app/backend
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

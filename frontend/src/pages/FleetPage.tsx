@@ -23,6 +23,7 @@ export function FleetPage() {
   const { info } = useAuth();
   const { refresh } = useRefresh();
   const plane = info?.plane;
+  const goals = Boolean(info?.features?.goals);
   const ssh = plane ? `${plane.ssh_user}@${plane.host}` : "root@host";
   const [nodeFilter, setNodeFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -82,7 +83,7 @@ export function FleetPage() {
 
       <Panel
         title="Supervised guests"
-        sub={data ? `${guests.length} guests · ${nodes.length} nodes · read-only` : "memuat state…"}
+        sub={data ? `${guests.length} guests · ${nodes.length} nodes · ${goals ? "goal-gated actions" : "read-only"}` : "memuat state…"}
         right={<Pill>{guests.length} guests</Pill>}
       >
         <div className="toolbar">
@@ -239,7 +240,7 @@ export function FleetPage() {
             {filtered.length} guests · {guests.length} total
           </span>
           <span style={{ color: "var(--faint)" }}>·</span>
-          <span>read-only</span>
+          <span>{goals ? "goal actions require approval" : "read-only"}</span>
           <span className="right">
             <button
               type="button"
@@ -399,8 +400,17 @@ export function FleetPage() {
               <div className="ro-note">
                 <Icon name="i-lock" className="icon sm" />
                 <span>
-                  UI ini <b>read-only</b>. Tindakan hanya lewat loop healer (gate deterministik) atau SSH
-                  manual — tidak ada endpoint aksi dari HTTP.
+                  {goals ? (
+                    <>
+                      UI insiden tetap <b>read-only</b>. Aksi hanya lewat <b>AI Goals</b> setelah plan
+                      tervalidasi dan disetujui manusia — tidak ada shell atau command bebas.
+                    </>
+                  ) : (
+                    <>
+                      UI ini <b>read-only</b>. Tindakan hanya lewat loop healer (gate deterministik) atau SSH
+                      manual — tidak ada endpoint aksi dari HTTP.
+                    </>
+                  )}
                 </span>
               </div>
 

@@ -3,6 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -46,6 +47,53 @@ class Settings(BaseSettings):
 
     # optional hardening
     allowed_hosts: str = ""
+    public_origin: str = ""
+    max_request_body: int = 64 * 1024
+
+    # AI goals (Phase 1/2) — every switch defaults to off.
+    goals_enabled: bool = False
+    goals_execute_enabled: bool = False
+    goals_data_dir: str = "/app/data"
+    goals_llm_enabled: bool = False
+    goals_llm_url: str = ""
+    goals_llm_key: str = ""
+    goals_llm_model: str = ""
+    goals_approvers: str = ""
+    goals_approver_groups: str = ""
+    goals_allow_self_approval: bool = False
+    goals_allow_password_approval: bool = False
+    goals_high_risk_passphrase: str = ""
+    goals_preview_ttl: int = 300
+    goals_approval_ttl: int = 900
+    goals_execution_ttl: int = 600
+    goals_max_goal_chars: int = 1000
+    goals_rate_limit_per_hour: int = 10
+    goals_control_base: str = "http://127.0.0.1:9182"
+    goals_control_key: str = ""
+    goals_control_timeout: float = 150.0
+    goals_auto_execute_after_approval: bool = False
+
+    @property
+    def public_origins(self) -> list[str]:
+        return [item.strip().rstrip("/") for item in self.public_origin.split(",") if item.strip()]
+
+    @property
+    def goals_approver_names(self) -> set[str]:
+        return {item.strip() for item in self.goals_approvers.split(",") if item.strip()}
+
+    @property
+    def goals_approver_group_names(self) -> set[str]:
+        return {item.strip() for item in self.goals_approver_groups.split(",") if item.strip()}
+
+    @property
+    def goals_control_is_loopback(self) -> bool:
+        try:
+            parsed = urlsplit(self.goals_control_base)
+        except ValueError:
+            return False
+        if parsed.scheme not in ("http", "https"):
+            return False
+        return (parsed.hostname or "").lower() in {"127.0.0.1", "::1", "localhost"}
 
     @property
     def links(self) -> dict[str, str]:

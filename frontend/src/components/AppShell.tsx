@@ -12,10 +12,21 @@ const SECTION_LABEL: Record<string, string> = {
   "/fleet": "fleet",
   "/incidents": "incidents",
   "/healer": "healer",
+  "/goals": "ai goals",
   "/raw": "raw data"
 };
 
-const NAV_GROUPS = [
+type NavItem = {
+  to: string;
+  label: string;
+  icon: string;
+  end?: boolean;
+  countKey?: "guests";
+  badgeKey?: "alerts";
+  requiresGoals?: boolean;
+};
+
+const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
   {
     label: "Plane",
     items: [
@@ -28,10 +39,11 @@ const NAV_GROUPS = [
     label: "Control",
     items: [
       { to: "/healer", label: "Healer", icon: "i-sliders" },
+      { to: "/goals", label: "AI Goals", icon: "i-target", requiresGoals: true },
       { to: "/raw", label: "Raw data", icon: "i-activity" }
     ]
   }
-] as const;
+];
 
 export function AppShell() {
   const { info, logout } = useAuth();
@@ -75,6 +87,7 @@ export function AppShell() {
   };
 
   const counts = { guests: guestsTotal, alerts: alertsFiring };
+  const goalsEnabled = Boolean(info?.features?.goals);
 
   return (
     <div className="app">
@@ -92,23 +105,25 @@ export function AppShell() {
           {NAV_GROUPS.map((group) => (
             <div key={group.label}>
               <div className="nav-label">{group.label}</div>
-              {group.items.map((item) => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  end={"end" in item ? item.end : false}
-                  className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}
-                >
-                  <Icon name={item.icon} />
-                  <span>{item.label}</span>
-                  {"countKey" in item && counts[item.countKey as "guests"] != null ? (
-                    <span className="nav-count">{counts.guests}</span>
-                  ) : null}
-                  {"badgeKey" in item && counts[item.badgeKey as "alerts"] != null ? (
-                    <span className="nav-badge">{counts.alerts}</span>
-                  ) : null}
-                </NavLink>
-              ))}
+              {group.items
+                .filter((item) => !item.requiresGoals || goalsEnabled)
+                .map((item) => (
+                  <NavLink
+                    key={item.to}
+                    to={item.to}
+                    end={item.end ?? false}
+                    className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}
+                  >
+                    <Icon name={item.icon} />
+                    <span>{item.label}</span>
+                    {item.countKey && counts[item.countKey] != null ? (
+                      <span className="nav-count">{counts[item.countKey]}</span>
+                    ) : null}
+                    {item.badgeKey && counts[item.badgeKey] != null ? (
+                      <span className="nav-badge">{counts[item.badgeKey]}</span>
+                    ) : null}
+                  </NavLink>
+                ))}
             </div>
           ))}
         </nav>

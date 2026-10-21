@@ -52,6 +52,7 @@ export function LoginPage() {
   const passwordMode = info?.mode === "password";
   const oidcMode = info?.mode === "oidc";
   const plane = info?.plane;
+  const goals = Boolean(info?.features?.goals);
 
   return (
     <div className="auth-page">
@@ -65,7 +66,7 @@ export function LoginPage() {
           </span>
         </a>
         <div className="status-chip">
-          <span className="dot mint pulse" /> read-only console
+          <span className="dot mint pulse" /> {goals ? "approval-gated console" : "read-only console"}
           {plane?.name ? <b>{plane.name}</b> : null}
         </div>
       </header>
@@ -82,8 +83,9 @@ export function LoginPage() {
               Sign in to the <em>plane</em>.
             </h1>
             <p className="auth-sub">
-              Laya reads the healer API and Prometheus, then shows what the plane did on its own. No
-              write path, no remote shell — read-only by design.
+              {goals
+                ? "Laya reads the healer API and Prometheus. AI Goals can propose a closed action set, but a human must approve every plan before the healer executes it."
+                : "Laya reads the healer API and Prometheus, then shows what the plane did on its own. No write path, no remote shell — read-only by design."}
             </p>
 
             {oidcMode ? (
@@ -149,8 +151,9 @@ export function LoginPage() {
             <div className="auth-note">
               <Icon name="i-shield" />
               <span>
-                Console ini read-only: tidak ada endpoint aksi, ack, atau silence. Tindakan hanya lewat
-                loop healer / SSH.
+                {goals
+                  ? "Konsol tetap read-only untuk insiden dan knob. Satu-satunya jalur aksi adalah AI Goals: plan tervalidasi server, kode persetujuan sekali pakai, aksi tertutup, lalu healer mengeksekusi."
+                  : "Console ini read-only: tidak ada endpoint aksi, ack, atau silence. Tindakan hanya lewat loop healer / SSH."}
               </span>
             </div>
           </div>

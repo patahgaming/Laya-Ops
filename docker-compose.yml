@@ -1,4 +1,5 @@
-# Laya Ops — read-only console for the VM105 monitoring plane.
+# Laya Ops — control-plane console for the VM105 monitoring plane.
+# Read-only by default; AI Goals is opt-in and requires human approval.
 #
 # Runs with host networking so the backend can reach the monitoring stack on
 # 127.0.0.1 (healer :9181, Prometheus :9090, Alertmanager :9093, Grafana :3000).
@@ -25,6 +26,9 @@ services:
       GRAFANA_BASE: ${GRAFANA_BASE:-http://127.0.0.1:3000}
       CLASSIFIER_BASE: ${CLASSIFIER_BASE:-}
       ENGINE_HEALER_BASE: ${ENGINE_HEALER_BASE:-}
+    volumes:
+      # Goals DB + audit. Set GOALS_DATA_DIR=/app/data in .env (default).
+      - laya-ops-data:/app/data
     command: ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-9190}"]
     healthcheck:
       test:
@@ -38,6 +42,10 @@ services:
       timeout: 5s
       start_period: 10s
       retries: 3
+
+volumes:
+  laya-ops-data:
+    name: laya-ops-data
 
 # Bridge-network alternative (if host networking is not an option):
 #   ports: ["9190:8000"]

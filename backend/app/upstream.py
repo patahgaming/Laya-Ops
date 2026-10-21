@@ -84,6 +84,45 @@ class Upstream:
                 error=_short_error(exc),
             )
 
+    async def post_json(
+        self,
+        name: str,
+        url: str,
+        payload: object,
+        *,
+        headers: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> ProbeResult:
+        """Server-side POST used only by the optional goals LLM planner.
+
+        The URL is always built from settings; no request value ever becomes a
+        full upstream URL. Redirects are not followed by the shared client.
+        """
+        started = time.perf_counter()
+        try:
+            response = await self._client.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            return ProbeResult(
+                name=name,
+                url=url,
+                ok=True,
+                ms=round((time.perf_counter() - started) * 1000),
+                value=response.json(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ProbeResult(
+                name=name,
+                url=url,
+                ok=False,
+                ms=round((time.perf_counter() - started) * 1000),
+                error=_short_error(exc),
+            )
+
     async def ready(self, name: str, base: str, path: str = "/-/ready") -> ProbeResult:
         return await self._request(name, base.rstrip("/") + path, kind="text")
 

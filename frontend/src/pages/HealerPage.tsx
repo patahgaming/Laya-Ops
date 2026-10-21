@@ -68,6 +68,8 @@ export function HealerPage() {
   const { refresh } = useRefresh();
   const toast = useToast();
   const plane = info?.plane;
+  const goals = Boolean(info?.features?.goals);
+  const goalsExecute = Boolean(info?.features?.goals_execute);
   const ssh = plane ? `${plane.ssh_user}@${plane.host}` : "root@host";
   const applyCommands = buildApplyCommands(ssh);
   const approvalCommands = buildApprovalCommands(ssh);
@@ -84,6 +86,7 @@ export function HealerPage() {
   const awaiting = pending.filter((item) => !item.approved);
   const classifier = data?.classifier;
   const engine = data?.engine;
+  const goalCount = data?.summary.goal_24h;
   const links = data?.links ?? {};
   const actionTotals = metrics?.action_totals ?? [];
   const incidentTotals = metrics?.incident_totals ?? [];
@@ -95,9 +98,13 @@ export function HealerPage() {
   return (
     <>
       <PageHead
-        eyebrow="Control · knob runtime · read-only"
+        eyebrow={goals ? "Control · knob runtime · incident approval" : "Control · knob runtime · read-only"}
         title="Healer"
-        sub="Konfigurasi runtime, antrean persetujuan, dan metrik healer. Read-only — perubahan dan approval lewat SSH/CLI."
+        sub={
+          goals
+            ? "Konfigurasi runtime, antrean persetujuan insiden, dan metrik healer. Approval insiden tetap lewat SSH/CLI; aksi goal lewat halaman AI Goals dengan approval terpisah."
+            : "Konfigurasi runtime, antrean persetujuan, dan metrik healer. Read-only — perubahan dan approval lewat SSH/CLI."
+        }
         actions={
           <>
             <Pill tone={dry ? "amber" : "mint"} dot={dry ? "amber" : "mint"} style={{ height: 30 }}>
@@ -202,6 +209,40 @@ export function HealerPage() {
               </span>
             </div>
           </Panel>
+
+          {goals ? (
+            <Panel
+              title="AI goal activity"
+              sub="24 jam terakhir · summary healer"
+              right={
+                <Pill tone={goalCount ? "violet" : "neutral"}>
+                  {goalCount != null ? `${goalCount} goal` : "—"}
+                </Pill>
+              }
+              body
+            >
+              <div className="kv" style={{ borderTop: 0, paddingTop: 0 }}>
+                <div>
+                  <div className="k">goal_24h</div>
+                  <div className="v" style={{ fontSize: 18 }}>{goalCount ?? "—"}</div>
+                  <div className="hint">tidak dihitung sebagai insiden</div>
+                </div>
+                <div>
+                  <div className="k">insiden_24h</div>
+                  <div className="v" style={{ fontSize: 18 }}>{data?.summary.insiden_24h ?? "—"}</div>
+                  <div className="hint">decision sumber non-goal</div>
+                </div>
+              </div>
+              <div className="ro-note" style={{ marginTop: 12 }}>
+                <Icon name={goalsExecute ? "i-key" : "i-lock"} className="icon sm" />
+                <span>
+                  {goalsExecute
+                    ? "Eksekusi goal aktif; tetap butuh approval manusia dan klik execute terpisah."
+                    : "GOALS_EXECUTE_ENABLED=false — goal berhenti di approved dan tidak ada aksi yang dikirim ke healer."}
+                </span>
+              </div>
+            </Panel>
+          ) : null}
 
           <Panel
             title="Auto-heal scope"

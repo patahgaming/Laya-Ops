@@ -6,7 +6,10 @@ Production:       uvicorn app.main:app --host 0.0.0.0 --port 8000 (serving front
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -20,11 +23,15 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .auth import router as auth_router
 from .cache import TTLCache
 from .config import Settings, get_settings
+from .goals.routes import router as goals_router
+from .goals.service import GoalError, GoalService
+from .goals.store import Store
 from .routes import router as api_router
-from .security import SecurityHeadersMiddleware
+from .security import RequestGuardMiddleware, SecurityHeadersMiddleware
 from .upstream import Upstream
 
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+LOG = logging.getLogger("laya.ops.goals")
 
 
 def _validate_settings(settings: Settings) -> None:
@@ -45,6 +52,25 @@ def _validate_settings(settings: Settings) -> None:
         if missing:
             raise RuntimeError("AUTH_MODE=oidc is missing: " + ", ".join(missing))
 
+    if settings.goals_execute_enabled and not settings.goals_enabled:
+        raise RuntimeError("GOALS_EXECUTE_ENABLED requires GOALS_ENABLED=true")
+    if settings.goals_auto_execute_after_approval:
+        raise RuntimeError("GOALS_AUTO_EXECUTE_AFTER_APPROVAL is not supported")
+    if settings.goals_enabled:
+        if settings.auth_mode == "off":
+            raise RuntimeError("GOALS_ENABLED=true requires AUTH_MODE=password or oidc")
+        if settings.session_secret == "dev-only-change-me":
+            raise RuntimeError("GOALS_ENABLED=true requires a non-default SESSION_SECRET")
+        if not settings.public_origins:
+            raise RuntimeError("GOALS_ENABLED=true requires PUBLIC_ORIGIN")
+    if settings.goals_execute_enabled:
+        if not settings.goals_control_is_loopback:
+            raise RuntimeError("GOALS_CONTROL_BASE must be a loopback URL when execution is enabled")
+        if len(settings.goals_control_key) < 32:
+            raise RuntimeError("GOALS_CONTROL_KEY must be at least 32 characters")
+    if settings.goals_llm_enabled and not settings.goals_llm_url:
+        raise RuntimeError("GOALS_LLM_ENABLED=true requires GOALS_LLM_URL")
+
 
 def _create_oauth(settings: Settings):
     from authlib.integrations.starlette_client import OAuth
@@ -55,9 +81,24 @@ def _create_oauth(settings: Settings):
         server_metadata_url=settings.oidc_issuer.rstrip("/") + "/.well-known/openid-configuration",
         client_id=settings.oidc_client_id,
         client_secret=settings.oidc_client_secret,
-        client_kwargs={"scope": "openid email profile"},
+        client_kwargs={"scope": "openid email profile groups"},
     )
     return oauth
+
+
+def _sweep(store: Store, settings: Settings) -> int:
+    now = datetime.now(UTC)
+    stale = now - timedelta(seconds=max(60, settings.goals_control_timeout + 30))
+    return store.sweep(now=now.isoformat(timespec="seconds"), stale_before=stale.isoformat(timespec="seconds"))
+
+
+async def _sweeper(store: Store, settings: Settings) -> None:
+    while True:
+        await asyncio.sleep(30)
+        try:
+            await asyncio.to_thread(_sweep, store, settings)
+        except Exception:  # noqa: BLE001 - a sweeper error must not kill the app
+            LOG.exception("goals sweeper failed")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -73,9 +114,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         app.state.upstream = Upstream(client, settings)
         app.state.cache = TTLCache()
+        store: Store | None = None
+        sweeper: asyncio.Task | None = None
         try:
+            if settings.goals_enabled:
+                store = Store(settings.goals_data_dir)
+                store.initialize()
+                app.state.goals = GoalService(settings, store, app.state.upstream)
+                _sweep(store, settings)
+                sweeper = asyncio.create_task(_sweeper(store, settings))
             yield
         finally:
+            if sweeper is not None:
+                sweeper.cancel()
+                try:
+                    await sweeper
+                except asyncio.CancelledError:
+                    pass
+            if store is not None:
+                store.close()
             await app.state.upstream.close()
 
     app = FastAPI(
@@ -88,10 +145,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     app.state.login_attempts = {}
+    app.state.goals = None
     if settings.auth_mode == "oidc":
         app.state.oauth = _create_oauth(settings)
 
-    app.add_middleware(SecurityHeadersMiddleware)
+    @app.exception_handler(GoalError)
+    async def goal_error_handler(_request: Request, exc: GoalError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    # Added first => innermost. Session must be outside the guard so the guard
+    # can read the signed csrf_token from the session.
+    app.add_middleware(RequestGuardMiddleware, settings=settings)
     app.add_middleware(
         SessionMiddleware,
         secret_key=settings.session_secret,
@@ -105,9 +173,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             TrustedHostMiddleware,
             allowed_hosts=[host.strip() for host in settings.allowed_hosts.split(",") if host.strip()],
         )
+    app.add_middleware(SecurityHeadersMiddleware)
 
     app.include_router(auth_router)
     app.include_router(api_router)
+    if settings.goals_enabled:
+        app.include_router(goals_router)
 
     @app.get("/api/healthz", tags=["health"])
     async def healthz() -> dict:

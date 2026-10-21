@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { api, errorMessage } from "../data/api";
+import { api, errorMessage, setCsrfToken } from "../data/api";
 import type { AuthInfo } from "../data/types";
 
 interface AuthState {
@@ -27,7 +27,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const reload = useCallback(async () => {
     try {
-      setInfo(await api.get<AuthInfo>("/api/auth/config"));
+      const next = await api.get<AuthInfo>("/api/auth/config");
+      setCsrfToken(next.csrf_token);
+      setInfo(next);
       setError(null);
     } catch (err) {
       setError(errorMessage(err));
@@ -42,7 +44,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(
     async (password: string) => {
-      await api.post<AuthInfo>("/api/auth/login", { password });
+      const next = await api.post<AuthInfo>("/api/auth/login", { password });
+      setCsrfToken(next.csrf_token);
       await reload();
     },
     [reload]
@@ -50,6 +53,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(async () => {
     await api.post("/api/auth/logout");
+    setCsrfToken("");
     await reload();
   }, [reload]);
 
