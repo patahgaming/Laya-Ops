@@ -1,0 +1,43 @@
+# Laya Ops — read-only console for the VM105 monitoring plane.
+#
+# Runs with host networking so the backend can reach the monitoring stack on
+# 127.0.0.1 (healer :9181, Prometheus :9090, Alertmanager :9093, Grafana :3000).
+# The app itself listens on :9190 (set PORT in .env).
+#
+#   cp .env.example .env   # fill AUTH_MODE / secret / upstreams
+#   docker compose up -d --build
+#
+services:
+  laya-ops:
+    build:
+      context: .
+    image: laya-ops:1.0.0
+    container_name: laya-ops
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      PORT: ${PORT:-9190}
+      HEALER_BASE: ${HEALER_BASE:-http://127.0.0.1:9181}
+      PROMETHEUS_BASE: ${PROMETHEUS_BASE:-http://127.0.0.1:9090}
+      ALERTMANAGER_BASE: ${ALERTMANAGER_BASE:-http://127.0.0.1:9093}
+      GRAFANA_BASE: ${GRAFANA_BASE:-http://127.0.0.1:3000}
+    command: ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-9190}"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9190/api/healthz', timeout=3)",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+# Bridge-network alternative (if host networking is not an option):
+#   ports: ["9190:8000"]
+#   extra_hosts: ["host.docker.internal:host-gateway"]
+#   environment: HEALER_BASE=http://host.docker.internal:9181, etc.

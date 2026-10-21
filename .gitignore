@@ -1,0 +1,15 @@
+# dependencies / build output
+node_modules/
+frontend/dist/
+backend/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.tsbuildinfo
+.env
+*.log
+
+# editor
+.vscode/
+.idea/
