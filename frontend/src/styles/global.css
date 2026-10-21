@@ -2183,16 +2183,6 @@ details.json .c {
   color: var(--text);
   font-weight: 500;
 }
-.auth-top .docs {
-  font-size: 11.5px;
-  color: var(--dim);
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-.auth-top .docs:hover {
-  color: var(--text);
-}
 
 .auth-stage {
   flex: 1;
@@ -2539,34 +2529,6 @@ details.json .c {
   flex-direction: column;
   gap: 10px;
 }
-.visual-stats {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 11px 13px;
-  border-radius: 11px;
-  border: 1px solid var(--line);
-  background: rgba(9, 11, 14, 0.7);
-  backdrop-filter: blur(6px);
-  font-size: 11px;
-  color: var(--muted);
-}
-.visual-stats .stat {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-}
-.visual-stats .sep {
-  color: var(--faint);
-  margin: 0 1px;
-}
-.visual-stats b {
-  color: var(--text);
-  font-family: var(--mono);
-  font-weight: 500;
-  font-size: 10.5px;
-}
 .visual-caption {
   display: flex;
   align-items: center;
@@ -2911,7 +2873,7 @@ details.json .c {
 
 .auth-modebox {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
   margin-top: 18px;
   padding: 12px;

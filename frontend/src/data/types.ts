@@ -6,11 +6,21 @@ export interface AuthUserInfo {
   method?: string;
 }
 
+export interface PlaneInfo {
+  name: string;
+  site: string;
+  host: string;
+  ssh_user: string;
+}
+
 export interface AuthInfo {
   mode: AuthMode;
   user: AuthUserInfo | null;
   provider: string;
   login_url?: string | null;
+  app_name: string;
+  app_version: string;
+  plane: PlaneInfo;
 }
 
 export interface SourceStatus {

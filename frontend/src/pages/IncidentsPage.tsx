@@ -56,7 +56,7 @@ export function IncidentsPage() {
       <div className="inc-layout">
         <Panel
           title="Alert groups"
-          sub={data ? 'dari /api/alerts · ALERTS{alertstate="firing"}' : "memuat alert…"}
+          sub="currently firing"
           right={<Pill>{data ? `${data.instances} instances` : "—"}</Pill>}
         >
           <div className="inc-list">
@@ -100,25 +100,6 @@ export function IncidentsPage() {
               ))
             )}
           </div>
-          <div className="panel-sep" />
-          <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 9 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span className="avatar" style={{ width: 26, height: 26, fontSize: 9.5 }}>
-                AR
-              </span>
-              <div>
-                <div style={{ fontSize: 11.5, fontWeight: 600 }}>Arif R. on call</div>
-                <div className="tiny dim">escalation → discord #infra-alerts</div>
-              </div>
-              <Pill tone="mint" style={{ marginLeft: "auto" }}>
-                paged
-              </Pill>
-            </div>
-            <div className="tiny dim" style={{ display: "flex", gap: 6, alignItems: "center" }}>
-              <Icon name="i-info" className="icon sm" /> Alertmanager hanya bisa dibaca dari LAN; UI tidak
-              mengirim ack/silence.
-            </div>
-          </div>
         </Panel>
 
         <section className="panel inc-detail">
@@ -147,6 +128,8 @@ function AlertDetail({
   const relevant = decisions.filter((decision) => matches(decision.target));
   const context = relevant.length ? relevant : decisions.slice(0, 5);
   const runbookText = group.runbook.lines.join("\n");
+  const prometheus = links.prometheus?.replace(/\/$/, "");
+  const alertmanager = links.alertmanager?.replace(/\/$/, "");
 
   return (
     <>
@@ -257,24 +240,30 @@ function AlertDetail({
           <div className="sect-label" style={{ margin: "18px 0 8px" }}>
             Links
           </div>
-          <a
-            className="btn btn-sm btn-block"
-            style={{ justifyContent: "flex-start", marginBottom: 8 }}
-            href={`${(links.prometheus ?? "http://10.10.0.107:9090").replace(/\/$/, "")}/alerts`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            Prometheus · /alerts <Icon name="i-arrow-up-right" className="icon sm" style={{ marginLeft: "auto" }} />
-          </a>
-          <a
-            className="btn btn-sm btn-block"
-            style={{ justifyContent: "flex-start" }}
-            href={`${(links.alertmanager ?? "http://10.10.0.107:9093").replace(/\/$/, "")}/#/alerts`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            Alertmanager · alerts <Icon name="i-arrow-up-right" className="icon sm" style={{ marginLeft: "auto" }} />
-          </a>
+          {prometheus ? (
+            <a
+              className="btn btn-sm btn-block"
+              style={{ justifyContent: "flex-start", marginBottom: 8 }}
+              href={`${prometheus}/alerts`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Prometheus · /alerts{" "}
+              <Icon name="i-arrow-up-right" className="icon sm" style={{ marginLeft: "auto" }} />
+            </a>
+          ) : null}
+          {alertmanager ? (
+            <a
+              className="btn btn-sm btn-block"
+              style={{ justifyContent: "flex-start" }}
+              href={`${alertmanager}/#/alerts`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Alertmanager · alerts{" "}
+              <Icon name="i-arrow-up-right" className="icon sm" style={{ marginLeft: "auto" }} />
+            </a>
+          ) : null}
         </div>
       </div>
 

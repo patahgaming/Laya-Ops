@@ -3,27 +3,34 @@ import { ErrorState, PageHead, Panel, Pill } from "../components/ui";
 import { timeOf } from "../data/format";
 import type { KnobsResponse } from "../data/types";
 import { useApi } from "../hooks/useApi";
+import { useAuth } from "../state/auth";
 import { useRefresh } from "../state/refresh";
 import { useToast } from "../state/toast";
 
-const APPLY_COMMANDS = [
-  "# 1. edit env runtime (env var, bukan file di repo)",
-  "ssh root@10.10.0.107 'sudoedit /etc/proxmox-healer.env'",
-  "",
-  "# 2. restart lalu pastikan unit hidup",
-  "ssh root@10.10.0.107 'systemctl restart proxmox-healer && systemctl is-active proxmox-healer'",
-  "",
-  "# 3. verifikasi knob yang benar-benar aktif",
-  "curl -s http://10.10.0.107:9181/api/knobs | jq .",
-  "",
-  "# 4. lihat baris startup (llm=ya|tidak, auto=[...])",
-  "ssh root@10.10.0.107 'journalctl -u proxmox-healer -n 5 --no-pager'"
-].join("\n");
+function buildApplyCommands(ssh: string): string {
+  return [
+    "# 1. edit env runtime (env var, bukan file di repo)",
+    `ssh ${ssh} 'sudoedit /etc/proxmox-healer.env'`,
+    "",
+    "# 2. restart lalu pastikan unit hidup",
+    `ssh ${ssh} 'systemctl restart proxmox-healer && systemctl is-active proxmox-healer'`,
+    "",
+    "# 3. verifikasi knob yang benar-benar aktif",
+    "curl -s http://127.0.0.1:9181/api/knobs | jq .",
+    "",
+    "# 4. lihat baris startup (llm=ya|tidak, auto=[...])",
+    `ssh ${ssh} 'journalctl -u proxmox-healer -n 5 --no-pager'`
+  ].join("\n");
+}
 
 export function HealerPage() {
   const { data, error, loading } = useApi<KnobsResponse>("/api/knobs", 30_000);
+  const { info } = useAuth();
   const { refresh } = useRefresh();
   const toast = useToast();
+  const plane = info?.plane;
+  const ssh = plane ? `${plane.ssh_user}@${plane.host}` : "root@host";
+  const applyCommands = buildApplyCommands(ssh);
   const knobs = data?.knobs ?? {};
   const dry = Boolean(knobs.DRY_RUN);
   const autoIds = knobs.AUTO_IDS ?? [];
@@ -38,7 +45,7 @@ export function HealerPage() {
       <PageHead
         eyebrow="Control · knob runtime · read-only"
         title="Healer"
-        sub="Konfigurasi aktif healer dari /api/knobs. Gate deterministik memutuskan; LLM hanya memilih di dalam daftar aksi tertutup. Tidak ada endpoint aksi dari UI."
+        sub="Konfigurasi runtime healer dari /api/knobs. Read-only — perubahan lewat SSH."
         actions={
           <>
             <Pill tone={dry ? "amber" : "mint"} dot={dry ? "amber" : "mint"} style={{ height: 30 }}>
@@ -55,15 +62,6 @@ export function HealerPage() {
       />
 
       {error && !data ? <ErrorState message={error} onRetry={refresh} /> : null}
-
-      <div className="ro-note" style={{ marginBottom: 14 }}>
-        <Icon name="i-lock" className="icon sm" />
-        <span>
-          <b>Read-only console.</b> Knob tinggal di <span className="mono">/etc/proxmox-healer.env</span> dan
-          dibaca runtime; untuk mengubahnya perlu edit env + <span className="mono">systemctl restart proxmox-healer</span>{" "}
-          lewat SSH. UI ini tidak punya jalur tulis, ack, atau trigger aksi.
-        </span>
-      </div>
 
       <div className="settings">
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -98,7 +96,6 @@ export function HealerPage() {
                       <span className="tiny dim">(kosong)</span>
                     )}
                   </div>
-                  <div className="hint">Satu aksi per siklus (MAX_AKSI), lalu cooldown per guest.</div>
                 </div>
 
                 <div className="knob">
@@ -120,7 +117,6 @@ export function HealerPage() {
                       <span className="tiny dim">(kosong)</span>
                     )}
                   </div>
-                  <div className="hint">105 = VM rumah healer sendiri.</div>
                 </div>
 
                 <div className="form-row form-row-3">
@@ -145,19 +141,16 @@ export function HealerPage() {
                   <div className="knob">
                     <div className="knob-label">K8S_NS</div>
                     <div className="ro-value">{k8sNs.length ? k8sNs.join(", ") : "(idle)"}</div>
-                    <div className="hint">kosong = modul k8s idle</div>
                   </div>
                   <div className="knob">
                     <div className="knob-label">LLM decider</div>
                     <div className="ro-value">{knobs.LLM_AKTIF ? knobs.LLM_MODEL || "aktif" : "tidak dipakai"}</div>
-                    <div className="hint">output divalidasi ke daftar aksi</div>
                   </div>
                 </div>
 
                 <div className="knob">
                   <div className="knob-label">DRY_RUN</div>
                   <div className="ro-value">{dry ? "aktif (1)" : "nonaktif (0)"}</div>
-                  <div className="hint">dry = catat + eskalasi saja, tidak ada aksi.</div>
                 </div>
 
                 <div className="knob">
@@ -186,18 +179,18 @@ export function HealerPage() {
           <Panel
             title="Apply changes (SSH)"
             sub="satu-satunya jalur ubah konfigurasi"
-            right={<Pill>root@10.10.0.107</Pill>}
+            right={<Pill>{ssh}</Pill>}
           >
             <div className="panel-body" id="apply" style={{ paddingTop: 0 }}>
               <div className="copy-command">
-                <div className="code-block">{APPLY_COMMANDS}</div>
+                <div className="code-block">{applyCommands}</div>
                 <button
                   type="button"
                   className="copy-btn"
                   aria-label="Copy commands"
                   onClick={() => {
                     void navigator.clipboard
-                      .writeText(APPLY_COMMANDS)
+                      .writeText(applyCommands)
                       .then(() => toast("Commands copied"))
                       .catch(() => toast("Clipboard tidak tersedia"));
                   }}
@@ -224,7 +217,7 @@ export function HealerPage() {
                 ["Deterministic gate", "Cooldown, MAX_AKSI, guest-agent pernah jawab, revisi sebelumnya ada. Jawaban pasti → aturan yang bertindak."],
                 ["Closed action set", "start · reset · noop · escalate · rollout undo. LLM tidak bisa memilih di luar daftar."],
                 ["Verify", "±90 detik setelah aksi. Gagal → eskalasi, tanpa percobaan buta kedua."],
-                ["Audit", "Satu baris decisions.jsonl per keputusan, plus metrik :9181."]
+                ["Audit", "Satu baris decisions.jsonl per keputusan, plus metrik healer."]
               ].map(([title, description], index) => (
                 <div className={`pipe-step${index === 1 ? " active" : ""}`} key={title}>
                   <span className="pipe-num">{String(index + 1).padStart(2, "0")}</span>
@@ -268,30 +261,6 @@ export function HealerPage() {
                   {k8sNs.length ? k8sNs.join(", ") : "idle"}
                 </div>
               </div>
-            </div>
-            <div className="tiny dim" style={{ marginTop: 14 }}>
-              Sumber: <span className="mono">/api/knobs</span>, <span className="mono">/api/decisions</span>,{" "}
-              <span className="mono">/metrics</span> · <span className="mono">pve_healer_up</span>.
-            </div>
-          </Panel>
-
-          <Panel title="Yang tidak bisa dilakukan UI" sub="by design">
-            <div className="checks">
-              {[
-                ["Tidak ada endpoint aksi", "start/reset/undo hanya dari loop healer", "i-x", "tone-coral"],
-                ["Tidak ada autentikasi UI", "bind ke LAN / tunnel; jangan expose :9181", "i-x", "tone-coral"],
-                ["Grafana tidak di-query", "pakai link Grafana langsung", "i-info", "tone-amber"]
-              ].map(([title, description, icon, tone]) => (
-                <div className="check" key={title}>
-                  <span className={`check-ico ${tone}`}>
-                    <Icon name={icon} />
-                  </span>
-                  <div className="check-main">
-                    <div className="check-name">{title}</div>
-                    <div className="check-val">{description}</div>
-                  </div>
-                </div>
-              ))}
             </div>
           </Panel>
         </div>

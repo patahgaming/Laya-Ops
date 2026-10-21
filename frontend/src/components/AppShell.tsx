@@ -53,6 +53,8 @@ export function AppShell() {
   }, [location.pathname]);
 
   const name = info?.user?.name ?? "operator";
+  const plane = info?.plane;
+  const site = plane?.site || "plane";
   const initials = name
     .split(/[\s._-]+/)
     .filter(Boolean)
@@ -114,9 +116,14 @@ export function AppShell() {
         <div className="sidebar-foot">
           <div className="plane-card">
             <div className="plane-card-top">
-              <span className="dot mint pulse" /> VM105 · monitor
+              <span className="dot mint pulse" /> {plane?.name || "plane"} · monitor
             </div>
-            <div className="plane-card-meta mono">10.10.0.107 · hq1</div>
+            {plane?.host ? (
+              <div className="plane-card-meta mono">
+                {plane.host}
+                {plane.site ? ` · ${plane.site}` : ""}
+              </div>
+            ) : null}
             <div className="plane-card-foot">
               <span>healer state</span>
               <span>{status ? `${status.summary.running}/${status.summary.total} running` : "—"}</span>
@@ -133,7 +140,6 @@ export function AppShell() {
             <button
               type="button"
               className="btn-icon"
-              title="Logout"
               aria-label="Logout"
               disabled={busy}
               onClick={() => void signOut()}
@@ -148,7 +154,7 @@ export function AppShell() {
       <div className="main">
         <header className="topbar">
           <div className="crumb">
-            <span>hq1</span>
+            <span>{site}</span>
             <span className="sep">/</span>
             <span className="mono">monitor</span>
             <span className="sep">/</span>
@@ -159,7 +165,7 @@ export function AppShell() {
               <span className="dot mint pulse" />
               LIVE · API <b className="mono">{clockOf(now)}</b>
             </span>
-            <button type="button" className="btn-icon" title="Refresh" aria-label="Refresh" onClick={refresh}>
+            <button type="button" className="btn-icon" aria-label="Refresh" onClick={refresh}>
               <Icon name="i-refresh" />
             </button>
             <span className="tiny dim mono">

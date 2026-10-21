@@ -8,7 +8,8 @@ import time
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
-from .schemas import AuthInfo, LoginRequest, Message
+from .config import Settings
+from .schemas import AuthInfo, LoginRequest, Message, PlaneInfo
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -38,6 +39,28 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _auth_info(
+    settings: Settings,
+    user: dict[str, str] | None,
+    provider: str,
+    login_url: str | None = None,
+) -> AuthInfo:
+    return AuthInfo(
+        mode=settings.auth_mode,
+        user=user,
+        provider=provider,
+        login_url=login_url,
+        app_name=settings.app_name,
+        app_version=settings.app_version,
+        plane=PlaneInfo(
+            name=settings.plane_name,
+            site=settings.plane_site,
+            host=settings.plane_host,
+            ssh_user=settings.plane_ssh_user,
+        ),
+    )
+
+
 def _rate_limited(request: Request) -> bool:
     attempts: dict[str, list[float]] = request.app.state.login_attempts
     ip = _client_ip(request)
@@ -55,9 +78,15 @@ def _rate_limited(request: Request) -> bool:
 async def auth_config(request: Request) -> AuthInfo:
     settings = request.app.state.settings
     user = current_user(request)
-    provider = "Keycloak" if settings.auth_mode == "oidc" else "Password" if settings.auth_mode == "password" else "LAN"
+    provider = (
+        "Keycloak"
+        if settings.auth_mode == "oidc"
+        else "Password"
+        if settings.auth_mode == "password"
+        else "LAN"
+    )
     login_url = "/api/auth/oidc/login" if settings.auth_mode == "oidc" else None
-    return AuthInfo(mode=settings.auth_mode, user=user, provider=provider, login_url=login_url)
+    return _auth_info(settings, user, provider, login_url)
 
 
 @router.post("/login", response_model=AuthInfo)
@@ -75,7 +104,7 @@ async def login(request: Request, payload: LoginRequest) -> AuthInfo:
     user = {"name": "operator", "method": "password"}
     request.session.clear()
     request.session["user"] = user
-    return AuthInfo(mode=settings.auth_mode, user=user, provider="Password")
+    return _auth_info(settings, user, "Password")
 
 
 @router.post("/logout", response_model=Message)
