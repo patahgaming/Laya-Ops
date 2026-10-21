@@ -83,6 +83,28 @@ export function OverviewPage() {
       {head}
       {error ? <ErrorState message={error} onRetry={refresh} title="Data mungkin sudah basi" /> : null}
 
+      {summary.menunggu_persetujuan > 0 ? (
+        <div className="banner">
+          <div className="banner-ico">
+            <Icon name="i-user" className="icon lg" />
+          </div>
+          <div className="banner-body">
+            <div className="banner-title">
+              {summary.menunggu_persetujuan} aksi menunggu persetujuan manusia
+            </div>
+            <div className="banner-sub">
+              Antrean dari <span className="mono">/api/pending</span>. Approval hanya lewat CLI di VM105 — tidak
+              ada endpoint approve/reject di Ops.
+            </div>
+          </div>
+          <div className="banner-actions">
+            <Link className="btn btn-sm" to="/healer">
+              Lihat antrean
+            </Link>
+          </div>
+        </div>
+      ) : null}
+
       {!alerts.ok ? (
         <div className="banner">
           <div className="banner-ico">
@@ -226,7 +248,9 @@ export function OverviewPage() {
             </Pill>
           }
           value={summary.aksi_24h}
-          note={`${summary.eskalasi_24h} escalated · ${summary.insiden_24h} incidents`}
+          note={`${summary.eskalasi_24h} escalated · ${summary.insiden_24h} incidents${
+            summary.menunggu_persetujuan ? ` · ${summary.menunggu_persetujuan} awaiting approval` : ""
+          }`}
           meter={
             <Meter
               segments={[
@@ -313,6 +337,10 @@ export function OverviewPage() {
                     </div>
                     <div className="decision-meta">
                       <Pill tone={decision.sumber === "llm" ? "violet" : "neutral"}>{decision.sumber}</Pill>
+                      {decision.jenis ? <Pill>{decision.jenis}</Pill> : null}
+                      {decision.izin ? (
+                        <Pill tone={decision.izin === "manusia" ? "amber" : "neutral"}>{decision.izin}</Pill>
+                      ) : null}
                       <span className="sep">·</span>
                       {decision.alasan.slice(0, 84) || "tanpa alasan"}
                     </div>

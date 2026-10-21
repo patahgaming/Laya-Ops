@@ -1,13 +1,17 @@
 """Application settings, loaded from environment / .env."""
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Load the repo-root .env no matter which directory uvicorn is started from.
+_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "Laya Ops"
     app_version: str = "1.0.0"
@@ -24,6 +28,9 @@ class Settings(BaseSettings):
     alertmanager_base: str = "http://127.0.0.1:9093"
     grafana_base: str = "http://127.0.0.1:3000"
     grafana_public_url: str = "https://grafana.smkn12jakarta.sch.id"
+    # optional runtimes — probes are skipped when the base is empty
+    classifier_base: str = ""
+    engine_healer_base: str = ""
     upstream_timeout: float = 6.0
     cache_ttl: float = 4.0
 
@@ -45,6 +52,7 @@ class Settings(BaseSettings):
         return {
             "grafana": self.grafana_public_url,
             "grafana_local": self.grafana_base,
+            "grafana_healer_dashboard": self.grafana_public_url.rstrip("/") + "/d/sre-healer",
             "prometheus": self.prometheus_base,
             "alertmanager": self.alertmanager_base,
             "healer_ui": self.healer_base.rstrip("/") + "/ui/live.html",

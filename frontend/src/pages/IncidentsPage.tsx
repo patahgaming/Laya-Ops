@@ -31,7 +31,7 @@ export function IncidentsPage() {
       <PageHead
         eyebrow="Incidents · Prometheus ALERTS · dibaca lewat proxy backend"
         title="Incidents"
-        sub="Alert group yang sedang firing, digabung dengan keputusan healer terakhir. Alert group = alertname; instance = target yang kena."
+        sub="Alert group Prometheus yang sedang firing, alert push healer dari Alertmanager, dan keputusan healer terakhir. Alert group = alertname; instance = target yang kena."
         actions={
           <>
             <Pill
@@ -110,6 +110,62 @@ export function IncidentsPage() {
           )}
         </section>
       </div>
+
+      <Panel
+        className="mt-14"
+        title="Healer push alerts"
+        sub="Alertmanager /api/v2/alerts · PveHealer* / Healer* — tidak muncul di Prometheus ALERTS"
+        right={
+          data ? (
+            <Pill
+              tone={data.pushed_ok ? (data.pushed.length ? "amber" : "mint") : "coral"}
+              dot={data.pushed_ok ? (data.pushed.length ? "amber" : "mint") : "coral"}
+            >
+              {data.pushed_ok ? `${data.pushed.length} active` : "tidak terjangkau"}
+            </Pill>
+          ) : null
+        }
+      >
+        <div className="comp-list">
+          {!data?.pushed_ok ? (
+            <Empty>Alertmanager /api/v2/alerts tidak terjangkau.</Empty>
+          ) : data.pushed.length === 0 ? (
+            <Empty>Tidak ada alert push dari healer.</Empty>
+          ) : (
+            data.pushed.map((alert) => (
+              <div className="comp" key={alert.fingerprint || `${alert.alertname}-${alert.starts_at}`}>
+                <span className={`comp-ico ${alert.severity === "critical" ? "tone-coral" : "tone-amber"}`}>
+                  <Icon name="i-bell" />
+                </span>
+                <div className="comp-main">
+                  <div className="comp-name">
+                    {alert.alertname}
+                    <span
+                      className={`pill ${alert.status === "active" ? "amber" : "mint"}`}
+                      style={{ height: 17, fontSize: 9.5, marginLeft: 6 }}
+                    >
+                      {alert.status}
+                    </span>
+                  </div>
+                  <div className="comp-meta">
+                    {alert.summary || "tanpa summary"}
+                    {alert.labels.vmid ? ` · vmid=${alert.labels.vmid}` : ""}
+                    {alert.labels.node ? ` · node=${alert.labels.node}` : ""}
+                    {alert.labels.namespace ? ` · ns=${alert.labels.namespace}` : ""}
+                  </div>
+                  {alert.description ? <div className="comp-meta mono">{alert.description}</div> : null}
+                </div>
+                <div className="comp-right">
+                  <div className="comp-stat">
+                    {timeOf(alert.starts_at)}
+                    <small>sejak</small>
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </Panel>
     </>
   );
 }

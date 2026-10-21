@@ -12,7 +12,10 @@ export function EndpointList({ endpoints }: { endpoints: SourceStatus[] }) {
             <Icon name={endpoint.ok ? "i-check" : "i-x"} />
           </span>
           <div className="check-main">
-            <div className="check-name">{endpoint.name}</div>
+            <div className="check-name">
+              {endpoint.name}
+              {endpoint.detail ? <span className="hint"> · {endpoint.detail}</span> : null}
+            </div>
             <div className="check-val">{endpoint.url.split("?")[0]}</div>
           </div>
           <Pill tone={endpoint.ok ? "mint" : "coral"}>{endpoint.ok ? `${endpoint.ms} ms` : "fail"}</Pill>

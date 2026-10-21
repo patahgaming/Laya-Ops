@@ -15,6 +15,14 @@ function decision(ts: Date, aksi = "reset", hasil = "pulih"): Decision {
     vmid: 201,
     nama: null,
     node: "hq2",
+    jenis: "mati",
+    tingkat: "minor",
+    izin: "minor",
+    jenis_guest: "ct",
+    status: "stopped",
+    agent: true,
+    oleh: "",
+    state: "",
     dry: false
   };
 }

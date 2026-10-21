@@ -355,10 +355,38 @@ export function FleetPage() {
                           <div className="event-body">
                             <div className="t">
                               {decision.aksi} → {decision.hasil}
+                              {decision.jenis ? (
+                                <span className="pill neutral" style={{ height: 17, fontSize: 9.5, marginLeft: 6 }}>
+                                  {decision.jenis}
+                                </span>
+                              ) : null}
+                              {decision.tingkat ? (
+                                <span className="pill neutral" style={{ height: 17, fontSize: 9.5, marginLeft: 4 }}>
+                                  {decision.tingkat}
+                                </span>
+                              ) : null}
+                              {decision.izin ? (
+                                <span
+                                  className={`pill ${decision.izin === "manusia" ? "amber" : "neutral"}`}
+                                  style={{ height: 17, fontSize: 9.5, marginLeft: 4 }}
+                                >
+                                  {decision.izin}
+                                </span>
+                              ) : null}
                             </div>
                             <div className="m">
-                              {timeOf(decision.ts)} · sumber={decision.sumber} · {decision.alasan.slice(0, 90)}
+                              {timeOf(decision.ts)} · sumber={decision.sumber}
+                              {decision.status ? ` · status=${decision.status}` : ""}
+                              {decision.agent != null ? ` · agent=${decision.agent ? "ok" : "silent"}` : ""}
+                              {decision.oleh ? ` · oleh=${decision.oleh}` : ""} ·{" "}
+                              {decision.alasan.slice(0, 90)}
                             </div>
+                            {decision.state ? (
+                              <details className="json" style={{ marginTop: 6 }}>
+                                <summary>state / evidence</summary>
+                                <pre>{decision.state}</pre>
+                              </details>
+                            ) : null}
                           </div>
                         </div>
                       ))

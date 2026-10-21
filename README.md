@@ -18,11 +18,15 @@ health endpoints. **There is no write path and no open proxy.**
         ▼
  FastAPI  ── httpx (read-only, server-side allow-list) ──► healer 127.0.0.1:9181
    │                                                          /api/summary, /api/state,
-   │                                                          /api/decisions, /api/knobs, /metrics
+   │                                                          /api/decisions, /api/knobs,
+   │                                                          /api/pending, /metrics
    │                                                          Prometheus 127.0.0.1:9090
    │                                                          /api/v1/query  (ALERTS, jobs)
-   │                                                          Alertmanager :9093 /-/ready
+   │                                                          Alertmanager :9093 /-/ready,
+   │                                                          /api/v2/alerts (push alerts)
    │                                                          Grafana :3000 /api/health
+   │                                                          classifier :8090/healthz  (opsional)
+   │                                                          sre-healer :8080/healthz, /decisions
    └── serves built SPA  (index.html + /assets + /icons.js)
 ```
 
@@ -51,7 +55,7 @@ laya-ops/
 │   │   ├── cache.py       async TTL cache
 │   │   ├── security.py    hardening headers
 │   │   └── schemas.py     pydantic response models
-│   ├── tests/             pytest + respx (16 tests, mocked upstreams)
+│   ├── tests/             pytest + respx (21 tests, mocked upstreams)
 │   ├── requirements.txt
 │   └── requirements-dev.txt
 ├── frontend/
@@ -86,9 +90,9 @@ pnpm install
 pnpm dev        # http://127.0.0.1:5173, proxies /api to :8000
 ```
 
-Run the backend on VM105 (or with `.env` pointing at it) so
-`HEALER_BASE`/`PROMETHEUS_BASE` resolve. Defaults are localhost, which is what
-the compose deployment uses.
+Copy `.env.example` to `.env` and set the `*_BASE` values for where the backend
+runs: `127.0.0.1` on VM105 itself, or `10.10.0.107:9181/9090/9093/3000` from
+another machine on the LAN.
 
 ```bash
 cp .env.example .env    # set AUTH_MODE, APP_PASSWORD, SESSION_SECRET, ...
@@ -108,10 +112,11 @@ Responses are pydantic models; `/api/docs` exposes OpenAPI (FastAPI).
 | `GET /api/overview` | agregat halaman overview: summary, guests, alerts, jobs, decisions, endpoint probes, metrics, links |
 | `GET /api/status` | ringan untuk shell/nav: summary + alert counts + jobs down + healer up |
 | `GET /api/guests` | guest state + last decision per vmid |
-| `GET /api/alerts` | alert group (alertname) + counts + oldest + runbook |
-| `GET /api/knobs` | `/api/knobs` healer + metrics + last decision |
-| `GET /api/decisions?limit=` | decision log terbaru |
-| `GET /api/raw?sources=` | payload mentah whitelisted untuk halaman Raw data |
+| `GET /api/alerts` | alert group Prometheus + counts + oldest + runbook + push alert healer dari Alertmanager |
+| `GET /api/knobs` | `/api/knobs` healer + metrics berlabel + last decision + pending + classifier/engine (opsional) |
+| `GET /api/pending` | antrean persetujuan manusia dari healer (read-only, tanpa approve/reject) |
+| `GET /api/decisions?limit=` | decision log terbaru (termasuk jenis/tingkat/izin/state) |
+| `GET /api/raw?sources=` | payload mentah whitelisted (`summary,state,knobs,decisions,metrics,pending,alerts,push_alerts,jobs`) |
 | `GET /api/auth/config` | mode auth + user |
 | `POST /api/auth/login` | login password (rate-limited) |
 | `GET /api/auth/oidc/login`, `/api/auth/oidc/callback` | Keycloak OIDC flow |
@@ -122,7 +127,7 @@ Responses are pydantic models; `/api/docs` exposes OpenAPI (FastAPI).
 ## Tests
 
 ```bash
-cd backend && .venv/Scripts/python -m pytest -q      # 16 passed
+cd backend && .venv/Scripts/python -m pytest -q      # 21 passed
 cd frontend && pnpm test && pnpm build               # vitest + tsc + vite
 ```
 
@@ -158,12 +163,16 @@ curl -s localhost:9190/api/healthz
 
 - No endpoint proxies arbitrary URLs: every upstream call is built from
   server-side settings, so the app cannot be used as an SSRF/open proxy.
-- No `start`/`reset`/`rollout_undo`/`ack`/`silence` endpoints. The healer loop
-  remains the only actor; the UI only visualises `decisions.jsonl` and Prometheus.
+- No `start`/`reset`/`rollout_undo`/`ack`/`silence`/`approve`/`reject` endpoints.
+  The healer loop remains the only actor; the UI only visualises `decisions.jsonl`,
+  the approval queue (`/api/pending`) and Prometheus.
+- Human approval stays on the VM105 CLI (`healer.py --pending/--approve`); Ops
+  shows the queue and copyable commands, never a write path.
 - Grafana is linked, not queried: its admin API needs credentials the browser
   must never hold.
-- Alert annotations are not exposed by the Prometheus query proxy; the UI says
-  so and links to Prometheus for the full alert text.
+- Prometheus alert annotations are not exposed by the PromQL query proxy; the UI
+  says so and links to Prometheus. Namespaced healer push alerts (PveHealer*,
+  Healer*) are read from Alertmanager `/api/v2/alerts`, including annotations.
 
 ## Roadmap (needed before any write action exists)
 

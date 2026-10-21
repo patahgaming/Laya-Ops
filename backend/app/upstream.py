@@ -32,10 +32,12 @@ class Upstream:
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def _request(self, name: str, url: str, *, kind: str = "json") -> ProbeResult:
+    async def _request(
+        self, name: str, url: str, *, kind: str = "json", params: dict[str, str] | None = None
+    ) -> ProbeResult:
         started = time.perf_counter()
         try:
-            response = await self._client.get(url)
+            response = await self._client.get(url, params=params)
             response.raise_for_status()
             value = response.text if kind == "text" else response.json()
             return ProbeResult(
@@ -89,6 +91,40 @@ class Upstream:
         return await self._request(
             "grafana_health",
             self.settings.grafana_base.rstrip("/") + "/api/health",
+            kind="json",
+        )
+
+    async def alertmanager_alerts(self) -> ProbeResult:
+        """Active alerts held by Alertmanager, including direct healer pushes.
+
+        Prometheus `ALERTS` only sees rule evaluations; alerts the healer posts to
+        the Alertmanager API (`PveHealerApproval`, `PveHealerEscalation`, ...) live
+        here and nowhere else.
+        """
+        return await self._request(
+            "am_alerts",
+            self.settings.alertmanager_base.rstrip("/") + "/api/v2/alerts",
+            params={"active": "true", "silenced": "false", "inhibited": "false"},
+        )
+
+    async def classifier_health(self) -> ProbeResult:
+        return await self._request(
+            "classifier_health",
+            self.settings.classifier_base.rstrip("/") + "/healthz",
+            kind="json",
+        )
+
+    async def engine_healer_health(self) -> ProbeResult:
+        return await self._request(
+            "engine_healer_health",
+            self.settings.engine_healer_base.rstrip("/") + "/healthz",
+            kind="json",
+        )
+
+    async def engine_healer_decisions(self) -> ProbeResult:
+        return await self._request(
+            "engine_healer_decisions",
+            self.settings.engine_healer_base.rstrip("/") + "/decisions",
             kind="json",
         )
 
