@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import secrets
 import time
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
 from .config import Settings
-from .schemas import AuthInfo, LoginRequest, Message, PlaneInfo
+from .csrf import ensure_csrf_token, rotate_csrf_token
+from .schemas import AuthInfo, FeatureFlags, LoginRequest, Message, PlaneInfo, UserInfo
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -17,19 +19,67 @@ MAX_ATTEMPTS = 5
 WINDOW_SECONDS = 60
 
 
-def current_user(request: Request) -> dict[str, str] | None:
+def current_user(request: Request) -> dict[str, Any] | None:
     settings = request.app.state.settings
     if settings.auth_mode == "off":
-        return {"name": "anonymous", "method": "off"}
+        return {
+            "name": "anonymous",
+            "method": "off",
+            "sub": "off:anonymous",
+            "groups": [],
+        }
     user = request.session.get("user")
     return user if isinstance(user, dict) else None
 
 
-def require_user(request: Request) -> dict[str, str]:
+def require_user(request: Request) -> dict[str, Any]:
     user = current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="login required")
     return user
+
+
+def user_groups(user: dict[str, Any]) -> list[str]:
+    raw = user.get("groups")
+    if not isinstance(raw, list):
+        return []
+    return [str(item)[:200] for item in raw if isinstance(item, str)]
+
+
+def is_approver(settings: Settings, user: dict[str, Any] | None) -> bool:
+    """Server-side approver check; never derived from request data."""
+    if not user or not settings.goals_enabled or settings.auth_mode == "off":
+        return False
+    if settings.auth_mode == "password" and not settings.goals_allow_password_approval:
+        return False
+    wanted_names = settings.goals_approver_names
+    wanted_groups = settings.goals_approver_group_names
+    if not wanted_names and not wanted_groups:
+        return False
+    name = str(user.get("name") or "")
+    if name and name in wanted_names:
+        return True
+    return bool(set(user_groups(user)) & wanted_groups)
+
+
+def require_approver(request: Request) -> dict[str, Any]:
+    user = require_user(request)
+    if not is_approver(request.app.state.settings, user):
+        raise HTTPException(status_code=403, detail="approver role required")
+    return user
+
+
+def _features(settings: Settings) -> FeatureFlags:
+    return FeatureFlags(
+        goals=settings.goals_enabled,
+        goals_execute=settings.goals_execute_enabled,
+        goals_llm=settings.goals_llm_enabled,
+        password_single_person=(
+            settings.auth_mode == "password"
+            and settings.goals_enabled
+            and settings.goals_allow_password_approval
+        ),
+    )
 
 
 def _client_ip(request: Request) -> str:
@@ -40,14 +90,24 @@ def _client_ip(request: Request) -> str:
 
 
 def _auth_info(
+    request: Request,
     settings: Settings,
-    user: dict[str, str] | None,
+    user: dict[str, Any] | None,
     provider: str,
     login_url: str | None = None,
 ) -> AuthInfo:
+    public_user = None
+    if user:
+        public_user = UserInfo(
+            name=str(user.get("name") or ""),
+            email=str(user.get("email") or ""),
+            method=str(user.get("method") or ""),
+            sub=str(user.get("sub") or ""),
+            groups=user_groups(user),
+        )
     return AuthInfo(
         mode=settings.auth_mode,
-        user=user,
+        user=public_user,
         provider=provider,
         login_url=login_url,
         app_name=settings.app_name,
@@ -58,6 +118,9 @@ def _auth_info(
             host=settings.plane_host,
             ssh_user=settings.plane_ssh_user,
         ),
+        csrf_token=ensure_csrf_token(request),
+        features=_features(settings),
+        can_approve=is_approver(settings, user),
     )
 
 
@@ -86,7 +149,7 @@ async def auth_config(request: Request) -> AuthInfo:
         else "LAN"
     )
     login_url = "/api/auth/oidc/login" if settings.auth_mode == "oidc" else None
-    return _auth_info(settings, user, provider, login_url)
+    return _auth_info(request, settings, user, provider, login_url)
 
 
 @router.post("/login", response_model=AuthInfo)
@@ -101,15 +164,22 @@ async def login(request: Request, payload: LoginRequest) -> AuthInfo:
         raise HTTPException(status_code=503, detail="APP_PASSWORD is not configured")
     if not secrets.compare_digest(payload.password.encode(), expected.encode()):
         raise HTTPException(status_code=401, detail="invalid password")
-    user = {"name": "operator", "method": "password"}
+    user = {
+        "name": "operator",
+        "method": "password",
+        "sub": "password:operator",
+        "groups": [],
+    }
     request.session.clear()
     request.session["user"] = user
-    return _auth_info(settings, user, "Password")
+    rotate_csrf_token(request)
+    return _auth_info(request, settings, user, "Password")
 
 
 @router.post("/logout", response_model=Message)
 async def logout(request: Request) -> Message:
     request.session.clear()
+    ensure_csrf_token(request, rotate=True)
     return Message(message="logged out")
 
 
@@ -134,11 +204,19 @@ async def oidc_callback(request: Request):
     except Exception:  # noqa: BLE001 - redirect back to login on any IdP error
         return RedirectResponse("/login?error=oidc", status_code=303)
     userinfo = token.get("userinfo") or {}
+    groups_raw = userinfo.get("groups")
+    groups = [str(item)[:200] for item in groups_raw] if isinstance(groups_raw, list) else []
+    sub = str(userinfo.get("sub") or "")
+    if not sub:
+        return RedirectResponse("/login?error=oidc", status_code=303)
     user = {
-        "name": str(userinfo.get("preferred_username") or userinfo.get("email") or "operator"),
-        "email": str(userinfo.get("email") or ""),
+        "name": str(userinfo.get("preferred_username") or userinfo.get("email") or "operator")[:200],
+        "email": str(userinfo.get("email") or "")[:320],
         "method": "oidc",
+        "sub": sub[:255],
+        "groups": groups[:100],
     }
     request.session.clear()
     request.session["user"] = user
+    rotate_csrf_token(request)
     return RedirectResponse("/", status_code=303)

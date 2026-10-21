@@ -3,6 +3,7 @@ import { AppShell } from "./components/AppShell";
 import { ErrorState } from "./components/ui";
 import { useAuth } from "./state/auth";
 import { FleetPage } from "./pages/FleetPage";
+import { GoalsPage } from "./pages/GoalsPage";
 import { HealerPage } from "./pages/HealerPage";
 import { IncidentsPage } from "./pages/IncidentsPage";
 import { LoginPage } from "./pages/LoginPage";
@@ -45,6 +46,10 @@ export default function App() {
         <Route path="fleet" element={<FleetPage />} />
         <Route path="incidents" element={<IncidentsPage />} />
         <Route path="healer" element={<HealerPage />} />
+        <Route
+          path="goals"
+          element={info.features.goals ? <GoalsPage /> : <Navigate to="/" replace />}
+        />
         <Route path="raw" element={<RawPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

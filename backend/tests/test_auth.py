@@ -9,8 +9,16 @@ from app.main import create_app
 from .conftest import build_settings
 
 
+def _csrf(client) -> str:
+    return client.get("/api/auth/config").json()["csrf_token"]
+
+
+def _post(client, path: str, **kwargs):
+    return client.post(path, headers={"X-CSRF-Token": _csrf(client)}, **kwargs)
+
+
 def test_auth_off_exposes_anonymous(password_client):
-    password_client.post("/api/auth/logout")
+    _post(password_client, "/api/auth/logout")
     config = password_client.get("/api/auth/config").json()
     assert config["mode"] == "password"
     assert config["user"] is None
@@ -51,24 +59,60 @@ def test_auth_config_uses_plane_settings():
 def test_password_login_protects_api(password_client):
     assert password_client.get("/api/overview").status_code == 401
 
-    bad = password_client.post("/api/auth/login", json={"password": "nope"})
+    bad = _post(password_client, "/api/auth/login", json={"password": "nope"})
     assert bad.status_code == 401
 
-    good = password_client.post("/api/auth/login", json={"password": "correct-horse"})
+    good = _post(password_client, "/api/auth/login", json={"password": "correct-horse"})
     assert good.status_code == 200
     assert good.json()["user"]["name"] == "operator"
     assert "laya_session" in password_client.cookies
 
     assert password_client.get("/api/overview").status_code == 200
 
-    password_client.post("/api/auth/logout")
+    _post(password_client, "/api/auth/logout")
     assert password_client.get("/api/overview").status_code == 401
 
 
 def test_login_rate_limit(password_client):
     for _ in range(5):
-        assert password_client.post("/api/auth/login", json={"password": "nope"}).status_code == 401
-    assert password_client.post("/api/auth/login", json={"password": "nope"}).status_code == 429
+        assert _post(password_client, "/api/auth/login", json={"password": "nope"}).status_code == 401
+    assert _post(password_client, "/api/auth/login", json={"password": "nope"}).status_code == 429
+
+
+def test_unsafe_requests_require_csrf(password_client):
+    missing = password_client.post("/api/auth/login", json={"password": "correct-horse"})
+    assert missing.status_code == 403
+    assert missing.json()["detail"] == "csrf token missing or invalid"
+
+    wrong = password_client.post(
+        "/api/auth/login",
+        json={"password": "correct-horse"},
+        headers={"X-CSRF-Token": "x" * 43},
+    )
+    assert wrong.status_code == 403
+
+
+def test_unsafe_requests_require_json(password_client):
+    token = _csrf(password_client)
+    response = password_client.post(
+        "/api/auth/login",
+        content="password=correct-horse",
+        headers={"X-CSRF-Token": token, "Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert response.status_code == 415
+
+
+def test_origin_is_enforced_when_configured(upstream):
+    app = create_app(build_settings(public_origin="https://ops.example.test"))
+    with TestClient(app) as client:
+        token = _csrf(client)
+        wrong = client.post(
+            "/api/auth/login",
+            json={"password": "correct-horse"},
+            headers={"X-CSRF-Token": token, "Origin": "https://evil.example.test"},
+        )
+        assert wrong.status_code == 403
+        assert wrong.json()["detail"] == "origin not allowed"
 
 
 def test_oidc_requires_configuration():

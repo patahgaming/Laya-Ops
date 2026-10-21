@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class SourceStatus(BaseModel):
@@ -32,6 +32,7 @@ class Summary(BaseModel):
     pulih_24h: int = 0
     eskalasi_24h: int = 0
     menunggu_persetujuan: int = 0
+    goal_24h: int = 0
     dry: bool = False
     targets: Targets = Field(default_factory=Targets)
 
@@ -57,6 +58,8 @@ class Decision(BaseModel):
     oleh: str = ""
     state: str = ""
     dry: bool = False
+    plan_id: str = ""
+    plan_hash: str = ""
 
 
 class Guest(BaseModel):
@@ -67,6 +70,8 @@ class Guest(BaseModel):
     sejak: str = ""
     agent_ok: bool = False
     agent_gagal: int = 0
+    guest_type: str = ""
+    agent: bool | None = None
     last_action: Decision | None = None
 
 
@@ -263,18 +268,38 @@ class PlaneInfo(BaseModel):
     ssh_user: str = "root"
 
 
+class UserInfo(BaseModel):
+    name: str = ""
+    email: str = ""
+    method: str = ""
+    sub: str = ""
+    groups: list[str] = Field(default_factory=list)
+
+
+class FeatureFlags(BaseModel):
+    goals: bool = False
+    goals_execute: bool = False
+    goals_llm: bool = False
+    password_single_person: bool = False
+
+
 class AuthInfo(BaseModel):
     mode: Literal["off", "password", "oidc"]
-    user: dict[str, str] | None = None
+    user: UserInfo | None = None
     provider: str = "None"
     login_url: str | None = None
     app_name: str = ""
     app_version: str = ""
     plane: PlaneInfo = Field(default_factory=PlaneInfo)
+    csrf_token: str = ""
+    features: FeatureFlags = Field(default_factory=FeatureFlags)
+    can_approve: bool = False
 
 
 class LoginRequest(BaseModel):
-    password: str = ""
+    model_config = ConfigDict(extra="forbid")
+
+    password: str = Field(default="", max_length=1024)
 
 
 class Message(BaseModel):

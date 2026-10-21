@@ -102,5 +102,55 @@ def runtime_client(upstream):
         yield test_client
 
 
+GOALS_PASSWORD = "correct-horse"
+GOALS_ORIGIN = "http://testserver"
+
+
+def goals_settings(tmp_path, **overrides) -> Settings:
+    values = {
+        "auth_mode": "password",
+        "app_password": GOALS_PASSWORD,
+        "session_secret": "goals-test-secret-0123456789",
+        "public_origin": GOALS_ORIGIN,
+        "goals_enabled": True,
+        "goals_data_dir": str(tmp_path / "data"),
+        "goals_approvers": "operator",
+        "goals_allow_password_approval": True,
+        "goals_allow_self_approval": True,
+        "goals_max_goal_chars": 1000,
+    }
+    values.update(overrides)
+    return build_settings(**values)
+
+
+@pytest.fixture
+def goals_client(upstream, tmp_path):
+    app = create_app(goals_settings(tmp_path))
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def goals_two_person_client(upstream, tmp_path):
+    app = create_app(goals_settings(tmp_path, goals_allow_self_approval=False))
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def goals_llm_client(upstream, tmp_path):
+    app = create_app(
+        goals_settings(
+            tmp_path,
+            goals_llm_enabled=True,
+            goals_llm_url="http://llm.test/v1",
+            goals_llm_model="test-model",
+            goals_llm_key="server-side-test-key",
+        )
+    )
+    with TestClient(app) as test_client:
+        yield test_client
+
+
 # keep ruff from flagging imported payloads used only by tests via fixtures
 _ = (ALERTS, ALERTS_AGE, JOBS, JOBS_DOWN)

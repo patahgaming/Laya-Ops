@@ -118,6 +118,7 @@ def parse_summary(raw: Any) -> Summary:
         pulih_24h=int(raw.get("pulih_24j") or raw.get("pulih_24h") or 0),
         eskalasi_24h=int(raw.get("eskalasi_24j") or raw.get("eskalasi_24h") or 0),
         menunggu_persetujuan=int(raw.get("menunggu_persetujuan") or 0),
+        goal_24h=int(raw.get("goal_24j") or raw.get("goal_24h") or 0),
         dry=bool(raw.get("dry")),
         targets=targets,
     )
@@ -153,6 +154,8 @@ def normalize_decision(record: dict[str, Any]) -> Decision:
         oleh=str(record.get("oleh") or ""),
         state=str(record.get("state") or ""),
         dry=bool(record.get("dry") and record.get("dry") is not False),
+        plan_id=str(record.get("plan_id") or ""),
+        plan_hash=str(record.get("plan_hash") or ""),
     )
 
 
@@ -183,15 +186,19 @@ def build_guests(state: Any, decisions: list[Decision]) -> Guests:
         except (TypeError, ValueError):
             continue
         row = value if isinstance(value, dict) else {}
+        guest_type = str(row.get("jenis") or row.get("jenis_guest") or "")
+        raw_agent = row.get("agent")
         guests.append(
             Guest(
                 vmid=vmid,
-                name=name_by_vmid.get(vmid),
+                name=str(row.get("nama") or "") or name_by_vmid.get(vmid),
                 node=str(row.get("node") or ""),
                 status=str(row.get("status") or "unknown"),
                 sejak=str(row.get("sejak") or ""),
                 agent_ok=bool(row.get("agent_ok")),
                 agent_gagal=int(row.get("agent_gagal") or 0),
+                guest_type=guest_type,
+                agent=raw_agent if isinstance(raw_agent, bool) else None,
                 last_action=last_by_vmid.get(vmid),
             )
         )
