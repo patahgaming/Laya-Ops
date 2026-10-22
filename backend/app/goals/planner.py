@@ -15,10 +15,18 @@ from typing import Any
 
 from ..config import Settings
 from ..upstream import Upstream
-from .schemas import Plan, PlanStep, PlanTarget
-from .templates import TEMPLATE_VERSION
+from .schemas import (
+    K8sPlan,
+    K8sPlanStep,
+    K8sPlanTarget,
+    Plan,
+    PlanStep,
+    PlanTarget,
+)
+from .templates import K8S_ROLLBACK, TEMPLATE_VERSION
 
 EXECUTABLE = {"start", "resume", "reset"}
+K8S_EXECUTABLE = {"rollout_undo"}
 RISK_RANK = {"low": 1, "medium": 2, "high": 3}
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
@@ -167,6 +175,131 @@ def build_plan(
         evidence_hash=sha256_json(evidence),
     )
     return plan.model_dump(mode="json")
+
+
+# ------------------------------------------------------------ Kubernetes
+def _k8s_images(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [clean_text(item, 300) for item in value[:20] if clean_text(item, 300)]
+
+
+def _k8s_target_dict(snapshot: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "namespace": clean_text(snapshot.get("namespace"), 63),
+        "deployment": clean_text(snapshot.get("deployment"), 253),
+        "revision": int(snapshot.get("revision") or 0),
+        "previous_revision": int(snapshot.get("previous_revision") or 0),
+        "status": clean_text(snapshot.get("status"), 40),
+        "replicas": int(snapshot.get("replicas") or 0),
+        "available": int(snapshot.get("available") or 0),
+        "images": _k8s_images(snapshot.get("images")),
+        "previous_images": _k8s_images(snapshot.get("previous_images")),
+    }
+
+
+def k8s_candidates(snapshot: dict[str, Any]) -> set[str]:
+    """Aksi yang aman untuk keadaan Deployment saat ini.
+
+    Rollback hanya ditawarkan bila Deployment sedang degraded DAN ada revisi
+    sebelumnya yang berbeda. Deployment yang sengaja diskalakan ke nol tidak
+    pernah di-rollback.
+    """
+    status = str(snapshot.get("status") or "")
+    revision = int(snapshot.get("revision") or 0)
+    previous = int(snapshot.get("previous_revision") or 0)
+    if status == "degraded" and previous > 0 and previous != revision:
+        return {"rollout_undo", "noop", "escalate"}
+    if status == "available":
+        return {"noop", "escalate"}
+    return {"escalate"}
+
+
+def k8s_rule_decision(
+    snapshot: dict[str, Any],
+) -> tuple[str, str, list[str]]:
+    status = str(snapshot.get("status") or "")
+    revision = int(snapshot.get("revision") or 0)
+    previous = int(snapshot.get("previous_revision") or 0)
+    warnings: list[str] = []
+    if status == "degraded" and previous > 0 and previous != revision:
+        warnings.append("Rollback mengembalikan seluruh container list revisi sebelumnya.")
+        return (
+            "rollout_undo",
+            (
+                f"Deployment degraded (revisi {revision}); rollout_undo ke revisi "
+                f"{previous} adalah aksi tertutup yang sesuai."
+            ),
+            warnings,
+        )
+    if status == "degraded" and previous <= 0:
+        warnings.append("Tidak ada ReplicaSet sebelumnya; rollback tidak mungkin.")
+        return "escalate", "Deployment degraded tetapi tidak punya revisi sebelumnya.", warnings
+    if status == "scaled-to-zero":
+        warnings.append("Deployment sengaja diskalakan ke nol; rollback tidak aman.")
+        return "escalate", "Deployment diskalakan ke nol; perlu keputusan operator.", warnings
+    if status == "available":
+        return "noop", "Deployment sudah tersedia; tidak ada aksi yang diperlukan.", warnings
+    return "escalate", f"Status {status or 'tidak diketahui'} tidak punya aksi aman.", warnings
+
+
+def build_k8s_plan(
+    snapshot: dict[str, Any],
+    variables: dict[str, Any],
+    goal: str,
+    evidence: dict[str, Any],
+    *,
+    action: str,
+    risk: str,
+    rationale: str,
+    warnings: list[str],
+) -> dict[str, Any]:
+    plan_target = K8sPlanTarget(**_k8s_target_dict(snapshot))
+    step = K8sPlanStep(
+        step_id="step-1",
+        action=action,  # type: ignore[arg-type]
+        target=plan_target,
+        expected_effect=str(variables.get("expected_effect") or "available"),
+        risk=risk,  # type: ignore[arg-type]
+        requires_approval=True,
+    )
+    plan = K8sPlan(
+        template_id=K8S_ROLLBACK,
+        template_version=TEMPLATE_VERSION,
+        goal=clean_text(goal, 1000),
+        target=plan_target,
+        variables={
+            "reason": clean_text(variables.get("reason"), 200),
+            "expected_effect": "available",
+        },
+        steps=[step],
+        rationale=clean_text(rationale, 500),
+        warnings=[clean_text(item, 200) for item in warnings[:3] if clean_text(item, 200)],
+        generated_by="rules",
+        evidence_hash=sha256_json(evidence),
+    )
+    return plan.model_dump(mode="json")
+
+
+def decide_k8s(
+    snapshot: dict[str, Any],
+    variables: dict[str, Any],
+    goal: str,
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """Rules-only planner for Phase 3A; no LLM sees k8s targets yet."""
+    action, rationale, warnings = k8s_rule_decision(snapshot)
+    risk = "high" if action in K8S_EXECUTABLE else "medium"
+    return build_k8s_plan(
+        snapshot,
+        variables,
+        goal,
+        evidence,
+        action=action,
+        risk=risk,
+        rationale=rationale,
+        warnings=warnings,
+    )
 
 
 async def decide(

@@ -7,6 +7,7 @@ from typing import Any
 TEMPLATE_VERSION = "1"
 
 GUEST_RECOVER = "guest.recover.v1"
+K8S_ROLLBACK = "k8s.deployment.rollback.v1"
 
 # Variables are the only values an operator may supply. ``approval_code`` is a
 # one-time server-generated secret, not a variable and never sent to the LLM.
@@ -48,7 +49,41 @@ TEMPLATES: dict[str, dict[str, Any]] = {
                 "description": "Dibuat server saat goal dibuat dan ditampilkan sekali.",
             }
         ],
-    }
+    },
+    K8S_ROLLBACK: {
+        "id": K8S_ROLLBACK,
+        "version": TEMPLATE_VERSION,
+        "name": "Rollback Deployment Kubernetes",
+        "description": (
+            "Kembalikan satu Deployment ke ReplicaSet sebelumnya dengan rollout_undo. "
+            "Hanya Deployment yang ada di allow-list healer."
+        ),
+        "target_kind": "k8s_deployment",
+        "actions": ["rollout_undo", "noop", "escalate"],
+        "max_steps": 1,
+        "variables": [
+            {
+                "name": "reason",
+                "type": "string",
+                "required": True,
+                "max_length": 200,
+                "description": "Alasan tindakan, terlihat oleh approver.",
+            },
+            {
+                "name": "expected_effect",
+                "type": "enum",
+                "required": True,
+                "enum": ["available"],
+                "default": "available",
+            },
+        ],
+        "manual_secrets": [
+            {
+                "name": "approval_code",
+                "description": "Dibuat server saat goal dibuat dan ditampilkan sekali.",
+            }
+        ],
+    },
 }
 
 

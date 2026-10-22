@@ -175,6 +175,77 @@ PENDING = [
     },
 ]
 
+K8S_STATE = {
+    "enabled": True,
+    "deployments": [
+        {
+            "ok": True,
+            "namespace": "aspirasi",
+            "deployment": "web",
+            "revision": 12,
+            "previous_revision": 11,
+            "replicas": 3,
+            "available": 0,
+            "ready": 0,
+            "updated": 3,
+            "status": "degraded",
+            "images": ["ghcr.io/laya/web:v2"],
+            "previous_images": ["ghcr.io/laya/web:v1"],
+            "protected": False,
+            "allowed": True,
+        },
+        {
+            "ok": True,
+            "namespace": "aspirasi",
+            "deployment": "cron",
+            "revision": 3,
+            "previous_revision": 0,
+            "replicas": 1,
+            "available": 0,
+            "ready": 0,
+            "updated": 1,
+            "status": "degraded",
+            "images": ["cron:1"],
+            "previous_images": [],
+            "protected": False,
+            "allowed": True,
+        },
+        {
+            "ok": True,
+            "namespace": "monitoring",
+            "deployment": "prometheus",
+            "revision": 2,
+            "previous_revision": 1,
+            "replicas": 2,
+            "available": 2,
+            "ready": 2,
+            "updated": 2,
+            "status": "available",
+            "images": ["prometheus:2"],
+            "previous_images": ["prometheus:1"],
+            "protected": True,
+            "allowed": False,
+        },
+        {
+            "ok": False,
+            "namespace": "aspirasi",
+            "deployment": "down",
+            "revision": 0,
+            "previous_revision": 0,
+            "replicas": 0,
+            "available": 0,
+            "ready": 0,
+            "updated": 0,
+            "status": "unavailable",
+            "images": [],
+            "previous_images": [],
+            "protected": False,
+            "allowed": True,
+        },
+    ],
+}
+
+
 CLASSIFIER_HEALTH = {"ok": True, "model": "laya-v4"}
 ENGINE_HEALTH = {"ok": True}
 ENGINE_DECISIONS = [

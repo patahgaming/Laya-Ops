@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -23,6 +22,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .auth import router as auth_router
 from .cache import TTLCache
 from .config import Settings, get_settings
+from .goals.control import ControlClient
 from .goals.routes import router as goals_router
 from .goals.service import GoalError, GoalService
 from .goals.store import Store
@@ -68,6 +68,16 @@ def _validate_settings(settings: Settings) -> None:
             raise RuntimeError("GOALS_CONTROL_BASE must be a loopback URL when execution is enabled")
         if len(settings.goals_control_key) < 32:
             raise RuntimeError("GOALS_CONTROL_KEY must be at least 32 characters")
+        if settings.goals_control_timeout < 5:
+            raise RuntimeError("GOALS_CONTROL_TIMEOUT must be at least 5 seconds")
+        if settings.goals_control_request_timeout < 1:
+            raise RuntimeError("GOALS_CONTROL_REQUEST_TIMEOUT must be at least 1 second")
+        if settings.goals_control_request_timeout >= settings.goals_control_timeout:
+            raise RuntimeError(
+                "GOALS_CONTROL_REQUEST_TIMEOUT must be shorter than GOALS_CONTROL_TIMEOUT"
+            )
+        if settings.goals_control_poll_interval < 0.5:
+            raise RuntimeError("GOALS_CONTROL_POLL_INTERVAL must be at least 0.5 seconds")
     if settings.goals_llm_enabled and not settings.goals_llm_url:
         raise RuntimeError("GOALS_LLM_ENABLED=true requires GOALS_LLM_URL")
 
@@ -86,18 +96,12 @@ def _create_oauth(settings: Settings):
     return oauth
 
 
-def _sweep(store: Store, settings: Settings) -> int:
-    now = datetime.now(UTC)
-    stale = now - timedelta(seconds=max(60, settings.goals_control_timeout + 30))
-    return store.sweep(now=now.isoformat(timespec="seconds"), stale_before=stale.isoformat(timespec="seconds"))
-
-
-async def _sweeper(store: Store, settings: Settings) -> None:
+async def _sweeper(service: GoalService) -> None:
     while True:
         await asyncio.sleep(30)
         try:
-            await asyncio.to_thread(_sweep, store, settings)
-        except Exception:  # noqa: BLE001 - a sweeper error must not kill the app
+            await asyncio.to_thread(service.sweep)
+        except Exception:  # a sweeper error must not kill the app
             LOG.exception("goals sweeper failed")
 
 
@@ -115,14 +119,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.upstream = Upstream(client, settings)
         app.state.cache = TTLCache()
         store: Store | None = None
+        goals: GoalService | None = None
         sweeper: asyncio.Task | None = None
         try:
             if settings.goals_enabled:
                 store = Store(settings.goals_data_dir)
                 store.initialize()
-                app.state.goals = GoalService(settings, store, app.state.upstream)
-                _sweep(store, settings)
-                sweeper = asyncio.create_task(_sweeper(store, settings))
+                control = (
+                    ControlClient(
+                        settings.goals_control_base,
+                        settings.goals_control_key,
+                        request_timeout=settings.goals_control_request_timeout,
+                    )
+                    if settings.goals_execute_enabled
+                    else None
+                )
+                goals = GoalService(settings, store, app.state.upstream, control)
+                app.state.goals = goals
+                await asyncio.to_thread(goals.sweep)
+                sweeper = asyncio.create_task(_sweeper(goals))
             yield
         finally:
             if sweeper is not None:
@@ -131,6 +146,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     await sweeper
                 except asyncio.CancelledError:
                     pass
+            if goals is not None:
+                await goals.shutdown()
             if store is not None:
                 store.close()
             await app.state.upstream.close()

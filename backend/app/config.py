@@ -71,6 +71,8 @@ class Settings(BaseSettings):
     goals_control_base: str = "http://127.0.0.1:9182"
     goals_control_key: str = ""
     goals_control_timeout: float = 150.0
+    goals_control_request_timeout: float = 15.0
+    goals_control_poll_interval: float = 2.0
     goals_auto_execute_after_approval: bool = False
 
     @property
@@ -92,6 +94,10 @@ class Settings(BaseSettings):
         except ValueError:
             return False
         if parsed.scheme not in ("http", "https"):
+            return False
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            return False
+        if parsed.path not in ("", "/"):
             return False
         return (parsed.hostname or "").lower() in {"127.0.0.1", "::1", "localhost"}
 

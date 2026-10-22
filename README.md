@@ -9,9 +9,11 @@ the same origin; the service talks to the healer API, Prometheus and the service
 health endpoints.
 
 **Read-only by default, with no open proxy.** An optional AI Goals feature lets
-an authenticated operator submit a goal + variables, preview a server-built
-immutable plan, and request human approval. All goal switches default to off;
-Phase 1 stops at `approved` and never dispatches anything to the healer. See
+an authenticated operator submit a goal + variables for one Proxmox guest or one
+Kubernetes Deployment, preview a server-built immutable plan, and request human
+approval. All goal switches default to off. Execution is a separate opt-in: an
+approver must click Execute after approval, and the signed plan is then
+validated again by the healer before it acts. See
 [docs/goals.md](docs/goals.md).
 
 ![Overview](docs/shots/app-overview.png)
@@ -34,7 +36,7 @@ Phase 1 stops at `approved` and never dispatches anything to the healer. See
    │                                                          classifier :8090/healthz  (opsional)
    │                                                          sre-healer :8080/healthz, /decisions
    ├── AI Goals (opt-in) → immutable plan + approval in /app/data/goals.db
-   │                      (Phase 2: HMAC dispatch to healer :9182 — not wired)
+   │                      (opt-in execution: HMAC-signed POST to healer :9182)
    └── serves built SPA  (index.html + /assets + /icons.js)
 ```
 
@@ -48,8 +50,8 @@ Phase 1 stops at `approved` and never dispatches anything to the healer. See
   (`ALLOWED_HOSTS`), exact-origin checks + session-bound CSRF on unsafe
   requests, a request-body limit, no upstream URL parameter, and only
   whitelisted raw sources. AI Goals is off by default; when enabled it only
-  accepts closed actions, requires human approval, and in Phase 1 has no
-  execution path.
+  accepts closed actions and requires human approval. Execution is a second
+  opt-in that sends a signed plan only to the healer loopback control API.
 
 ## Repository layout
 
@@ -84,7 +86,7 @@ laya-ops/
 ├── Dockerfile             multi-stage: node build → python runtime
 ├── docker-compose.yml     host-network service on :9190 + goals data volume
 ├── docs/goals.md          AI Goals: threat model, lifecycle, flags
-├── docs/operations-vm105.md  deploy + Phase 1 rehearsal checklist
+├── docs/operations-vm105.md  deploy + Phase 1–3A rehearsal checklist
 └── .env.example
 ```
 
@@ -133,12 +135,13 @@ Responses are pydantic models; `/api/docs` exposes OpenAPI (FastAPI).
 | `GET /api/decisions?limit=` | decision log terbaru (termasuk jenis/tingkat/izin/state) |
 | `GET /api/raw?sources=` | payload mentah whitelisted (`summary,state,knobs,decisions,metrics,pending,alerts,push_alerts,jobs`) |
 | `GET /api/goals/templates` | template goal + spec variabel (tanpa secret) |
+| `GET /api/goals/targets?template_id=` | baris picker target: guest (vmid/node/status/`protected`) atau Deployment (revisi/replika/image/`allowed`/`protected`) |
 | `POST /api/goals/preview` | validasi target/variabel, jalankan planner, simpan preview |
 | `POST /api/goals` | buat goal dari preview + hash; kode approval tampil sekali |
 | `GET /api/goals?status=&limit=` | daftar goal milik requester (approver: semua) |
 | `GET /api/goals/{id}`, `/audit` | detail plan/approval/run + timeline audit |
 | `POST /api/goals/{id}/approve`, `/reject`, `/cancel` | keputusan manusia (approver; reject/cancel wajib alasan) |
-| `POST /api/goals/{id}/execute`, `/reconcile` | Phase 2; Phase 1 selalu `409 execution_disabled` |
+| `POST /api/goals/{id}/execute`, `/reconcile` | klik kedua approver (HMAC ke healer); reconcile hanya membaca journal |
 | `GET /api/auth/config` | mode auth + user + `csrf_token` + `features` + `can_approve` |
 | `POST /api/auth/login` | login password (rate-limited) |
 | `GET /api/auth/oidc/login`, `/api/auth/oidc/callback` | Keycloak OIDC flow |
@@ -154,8 +157,8 @@ approver identity.
 ## Tests
 
 ```bash
-cd backend && .venv/Scripts/python -m pytest -q      # 74 passed
-cd frontend && pnpm test && pnpm build               # 12 vitest + tsc + vite
+cd backend && .venv/Scripts/python -m pytest -q      # 104 passed
+cd frontend && pnpm test && pnpm build               # 18 vitest + tsc + vite
 ```
 
 The backend tests use `respx` and fixtures captured from the real VM105
@@ -190,8 +193,9 @@ curl -s localhost:9190/api/healthz
   (`GOALS_DATA_DIR=/app/data`). Back it up with `docker run --rm -v
   laya-ops-data:/data ...` before upgrades; deleting the volume deletes the
   audit trail and approval history.
-- Phase 1: leave `GOALS_EXECUTE_ENABLED=false`. Enabling goals only turns on
-  plan/preview/approval; execution is not available in this release. Follow
+- Execution is opt-in and off by default: leave `GOALS_EXECUTE_ENABLED=false`
+  until the healer is deployed with `CONTROL_ENABLED=1`, `GOALS_EXECUTE=1`, and a
+  matching `CONTROL_KEY`. Rehearse with `DRY_RUN=1` first. Follow
   [docs/goals.md](docs/goals.md) and [docs/operations-vm105.md](docs/operations-vm105.md).
 
 ## Read-only guarantees
@@ -203,12 +207,18 @@ curl -s localhost:9190/api/healthz
   routes can only write Ops' own SQLite state; they never accept a shell,
   SSH/kubectl command, URL, PromQL expression, or arbitrary action. The
   planner may only choose from the template's closed action set, the target is
-  resolved server-side, and `PROTECT` is enforced at preview and again at
-  create; Phase 2 would re-check it in the healer before execution.
-- Execution remains unavailable in Phase 1: `POST /api/goals/{id}/execute`
-  returns `409 execution_disabled`, and no request goes to the healer control
-  port. Human approval uses a one-time code, with an optional high-risk
-  passphrase; approve, reject, and cancel are audited.
+  resolved server-side (guest state or the healer's k8s allow-list), and
+  `PROTECT`/`K8S_PROTECT` are enforced at preview, at create, and again in the
+  healer before execution.
+- Execution is a second opt-in (`GOALS_EXECUTE_ENABLED=true`) and requires an
+  explicit Execute click after approval. Ops signs the plan with HMAC and sends
+  it only to a loopback control API; the healer re-validates signature, TTL,
+  `PROTECT`/`K8S_PROTECT`, target state, cooldown, pending incident approvals,
+  its allow-lists, and its own execution lock. There is no automatic retry and
+  no free-form command. `DRY_RUN=1` remains the healer default. Human approval
+  uses a one-time code, with an optional high-risk passphrase; approve, reject,
+  cancel, execute, and reconcile are audited. Kubernetes execution is limited
+  to `rollout_undo` on Deployments present in `K8S_ALLOW`.
 - Legacy incident approvals still stay on the VM105 CLI
   (`healer.py --pending/--approve`). Ops shows the queue and copyable commands;
   it does not expose `start`/`reset`/`rollout_undo`/`ack`/`silence` for
@@ -224,9 +234,10 @@ curl -s localhost:9190/api/healthz
 1. Replace session-password with Keycloak OIDC in production (already wired,
    needs a client in the `school` realm and `OIDC_*` env). OIDC is required for
    real two-person approval of AI Goals.
-2. AI Goals Phase 2: healer loopback `/execute` + `/runs/{plan_id}` with HMAC,
-   replay journal, `EXEC_LOCK`, dry-run rehearsal, and explicit confirmation.
-   See [docs/goals.md](docs/goals.md).
+2. AI Goals Phase 3 remaining: multi-step plans with per-step rollback, HA /
+   multi-worker dispatch, and k8s actions beyond Deployment `rollout_undo`
+   (Phase 3A already ships Deployment rollback). See
+   [docs/goals.md](docs/goals.md).
 3. Tail pod logs on demand through the k8s API (read-only, namespace allow-list).
 4. WebSocket/SSE streaming instead of polling.
 5. Grafana proxy with a dedicated read-only service account if panel embedding

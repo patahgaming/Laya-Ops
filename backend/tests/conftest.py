@@ -18,6 +18,7 @@ from .fake_upstream import (
     ENGINE_HEALTH,
     JOBS,
     JOBS_DOWN,
+    K8S_STATE,
     KNOBS,
     METRICS,
     PENDING,
@@ -49,6 +50,9 @@ def upstream():
         mock.get("http://healer.test/api/decisions").mock(return_value=httpx.Response(200, json=DECISIONS))
         mock.get("http://healer.test/api/knobs").mock(return_value=httpx.Response(200, json=KNOBS))
         mock.get("http://healer.test/api/pending").mock(return_value=httpx.Response(200, json=PENDING))
+        mock.get("http://healer.test/api/k8s").mock(
+            return_value=httpx.Response(200, json=K8S_STATE)
+        )
         mock.get("http://healer.test/metrics").mock(return_value=httpx.Response(200, text=METRICS))
         mock.get("http://prom.test/api/v1/query").mock(
             side_effect=lambda request: httpx.Response(
@@ -104,6 +108,8 @@ def runtime_client(upstream):
 
 GOALS_PASSWORD = "correct-horse"
 GOALS_ORIGIN = "http://testserver"
+GOALS_CONTROL_BASE = "http://127.0.0.1:9182"
+GOALS_CONTROL_KEY = "test-control-key-0123456789abcdef0123456789"
 
 
 def goals_settings(tmp_path, **overrides) -> Settings:
@@ -146,6 +152,23 @@ def goals_llm_client(upstream, tmp_path):
             goals_llm_url="http://llm.test/v1",
             goals_llm_model="test-model",
             goals_llm_key="server-side-test-key",
+        )
+    )
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def goals_execute_client(upstream, tmp_path):
+    app = create_app(
+        goals_settings(
+            tmp_path,
+            goals_execute_enabled=True,
+            goals_control_base=GOALS_CONTROL_BASE,
+            goals_control_key=GOALS_CONTROL_KEY,
+            goals_control_timeout=10,
+            goals_control_request_timeout=2,
+            goals_control_poll_interval=0.5,
         )
     )
     with TestClient(app) as test_client:

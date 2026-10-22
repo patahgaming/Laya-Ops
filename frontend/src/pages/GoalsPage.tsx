@@ -7,9 +7,15 @@ import { api, errorMessage } from "../data/api";
 import { dateTimeOf } from "../data/format";
 import {
   goalBlockedLabel,
+  goalIsActive,
   goalRiskTone,
+  goalRunLabel,
   goalStatusLabel,
   goalStatusTone,
+  goalTargetOptionKey,
+  isGuestTargetOption,
+  isK8sPlanTarget,
+  isK8sTargetOption,
   remainingLabel
 } from "../data/goals";
 import type {
@@ -18,11 +24,12 @@ import type {
   GoalCreated,
   GoalListResponse,
   GoalPreviewResponse,
+  GoalRun,
+  GoalTargetKind,
+  GoalTargetsResponse,
   GoalTemplate,
   GoalTemplatesResponse,
-  GoalView,
-  GuestsResponse,
-  KnobsResponse
+  GoalView
 } from "../data/types";
 import { useApi } from "../hooks/useApi";
 import { useAuth } from "../state/auth";
@@ -31,9 +38,10 @@ import { useToast } from "../state/toast";
 
 type VariableValue = string | boolean;
 type VariableValues = Record<string, VariableValue>;
-type Busy = "preview" | "create" | "approve" | "reject" | "cancel" | null;
+type Busy = "preview" | "create" | "approve" | "reject" | "cancel" | "execute" | "reconcile" | null;
 
 const MAX_GOAL_CHARS = 1000;
+const ACTIVE_POLL_MS = 3000;
 
 const APPROVAL_MODE_LABEL: Record<string, string> = {
   two_person: "two-person",
@@ -94,6 +102,88 @@ function goalWindow(goal: GoalView, now: number): string {
   return "—";
 }
 
+/** Target label shared by the execute panel, history table and drawer. */
+function goalTargetTitle(goal: GoalView): string {
+  if (goal.target_kind === "k8s_deployment") {
+    return `${goal.target?.namespace || "—"}/${goal.target?.deployment || "deployment"}`;
+  }
+  if (goal.target?.name) return goal.target.name;
+  const planTarget = goal.plan?.target;
+  if (planTarget && !isK8sPlanTarget(planTarget) && planTarget.name) return planTarget.name;
+  return "guest";
+}
+
+function goalTargetMeta(goal: GoalView): string {
+  if (goal.target_kind === "k8s_deployment") {
+    const revision = goal.target?.revision ?? "—";
+    const previous = goal.target?.previous_revision ?? "—";
+    return `rev ${revision} → ${previous} · ${goal.target?.status || "—"}`;
+  }
+  const planTarget = goal.plan?.target;
+  const guest = planTarget && !isK8sPlanTarget(planTarget) ? planTarget : null;
+  return `#${goal.target?.vmid ?? guest?.vmid ?? "—"} · ${goal.target?.node ?? guest?.node ?? "—"}`;
+}
+
+function runTone(run: GoalRun | null): "mint" | "coral" | "amber" | "blue" | "violet" | "neutral" {
+  if (!run) return "neutral";
+  if (run.status === "done") return run.dry_run ? "violet" : "mint";
+  if (run.status === "failed") return "coral";
+  if (run.status === "unknown") return "violet";
+  if (run.status === "rejected") return "neutral";
+  return "blue";
+}
+
+/** Journal-facing run detail. Ops only ever reads this; it never re-triggers work. */
+function GoalRunView({ run }: { run: GoalRun | null }) {
+  if (!run) return null;
+  return (
+    <div className="goal-run">
+      <div className="goal-run-head">
+        <span className="sect-title" style={{ margin: 0 }}>
+          Run journal
+        </span>
+        <div className="goal-plan-pills">
+          <Pill tone={runTone(run)} dot={runTone(run)}>
+            {goalRunLabel(run)}
+          </Pill>
+          {run.attempts > 1 ? <Pill tone="amber">attempt {run.attempts}</Pill> : null}
+          {run.dry_run ? <Pill tone="violet">DRY_RUN</Pill> : null}
+        </div>
+      </div>
+      <div className="kv goal-run-kv">
+        <div>
+          <div className="k">Run</div>
+          <div className="v mono">{run.id ? run.id.slice(0, 12) : "—"}</div>
+        </div>
+        <div>
+          <div className="k">Claimed</div>
+          <div className="v">{run.claimed_at ? dateTimeOf(run.claimed_at) : "—"}</div>
+        </div>
+        <div>
+          <div className="k">Finished</div>
+          <div className="v">{run.finished_at ? dateTimeOf(run.finished_at) : "—"}</div>
+        </div>
+        <div>
+          <div className="k">Error code</div>
+          <div className="v mono">{run.error_code || "—"}</div>
+        </div>
+      </div>
+      {run.error ? (
+        <div className="ro-note">
+          <Icon name="i-alert-triangle" className="icon sm" />
+          <span>{run.error}</span>
+        </div>
+      ) : null}
+      {run.result || run.error_code ? (
+        <details className="json">
+          <summary>Run result</summary>
+          <pre>{JSON.stringify(run.result ?? { error_code: run.error_code }, null, 2)}</pre>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
 export function GoalsPage() {
   const { info } = useAuth();
   const { refresh } = useRefresh();
@@ -105,8 +195,6 @@ export function GoalsPage() {
     goalsEnabled ? "/api/goals/templates" : null,
     120_000
   );
-  const guestsApi = useApi<GuestsResponse>("/api/guests", 30_000);
-  const knobsApi = useApi<KnobsResponse>(goalsEnabled ? "/api/knobs" : null, 30_000);
   const [historyVersion, setHistoryVersion] = useState(0);
   const historyApi = useApi<GoalListResponse>(
     goalsEnabled ? `/api/goals?limit=25&v=${historyVersion}` : null,
@@ -117,21 +205,9 @@ export function GoalsPage() {
     () => templatesApi.data?.templates ?? [],
     [templatesApi.data]
   );
-  const guests = useMemo(
-    () => [...(guestsApi.data?.guests.guests ?? [])].sort((a, b) => a.vmid - b.vmid),
-    [guestsApi.data]
-  );
-  const protectIds = useMemo(
-    () => new Set(knobsApi.data?.knobs.PROTECT ?? []),
-    [knobsApi.data]
-  );
-  const autoIds = useMemo(
-    () => new Set(knobsApi.data?.knobs.AUTO_IDS ?? []),
-    [knobsApi.data]
-  );
 
   const [templateId, setTemplateId] = useState("");
-  const [targetVmid, setTargetVmid] = useState("");
+  const [targetKey, setTargetKey] = useState("");
   const [goal, setGoal] = useState("");
   const [variables, setVariables] = useState<VariableValues>({});
   const [preview, setPreview] = useState<GoalPreviewResponse | null>(null);
@@ -148,6 +224,9 @@ export function GoalsPage() {
   const [confirmed, setConfirmed] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
   const [cancelReason, setCancelReason] = useState("");
+  const [executeOpen, setExecuteOpen] = useState(false);
+  const [executeConfirmed, setExecuteConfirmed] = useState(false);
+  const [executeError, setExecuteError] = useState<string | null>(null);
 
   const [drawerGoal, setDrawerGoal] = useState<GoalView | null>(null);
   const [audit, setAudit] = useState<GoalAuditResponse | null>(null);
@@ -167,6 +246,22 @@ export function GoalsPage() {
 
   const template = templates.find((item) => item.id === templateId) ?? templates[0] ?? null;
   const templateKey = template ? `${template.id}:${template.version}` : "";
+  const targetKind: GoalTargetKind =
+    template?.target_kind === "k8s_deployment" ? "k8s_deployment" : "proxmox_guest";
+
+  const targetsApi = useApi<GoalTargetsResponse>(
+    goalsEnabled && template
+      ? `/api/goals/targets?template_id=${encodeURIComponent(template.id)}`
+      : null,
+    30_000
+  );
+  const targetRows = useMemo(() => {
+    const data = targetsApi.data;
+    // A path change keeps the previous payload until the new one lands; never
+    // let guest rows leak into a k8s picker or vice versa.
+    if (!data || data.target_kind !== targetKind) return [];
+    return data.targets;
+  }, [targetsApi.data, targetKind]);
 
   useEffect(() => {
     setVariables((previous) => variablesFor(template, previous));
@@ -179,11 +274,16 @@ export function GoalsPage() {
     setPreview(null);
     setPreviewError(null);
     setIdempotencyKey("");
-  }, [templateKey, targetVmid, goal, variables]);
+  }, [templateKey, targetKey, goal, variables]);
 
-  const selectedGuest = guests.find((guest) => String(guest.vmid) === targetVmid) ?? null;
-  const selectedProtected = selectedGuest ? protectIds.has(selectedGuest.vmid) : false;
-  const selectedAuto = selectedGuest ? autoIds.has(selectedGuest.vmid) : false;
+  const selectedTarget =
+    targetRows.find((row) => goalTargetOptionKey(row) === targetKey) ?? null;
+  const selectedGuest =
+    selectedTarget && isGuestTargetOption(selectedTarget) ? selectedTarget : null;
+  const selectedDeployment =
+    selectedTarget && isK8sTargetOption(selectedTarget) ? selectedTarget : null;
+  const selectedProtected = selectedTarget ? selectedTarget.protected : false;
+  const selectedAuto = selectedGuest ? selectedGuest.auto : false;
 
   const drawerId = drawerGoal?.id ?? "";
   useEffect(() => {
@@ -213,6 +313,37 @@ export function GoalsPage() {
     };
   }, [drawerId]);
 
+  // While the dispatcher or healer owns the run, follow GET /api/goals/{id}.
+  // This is read-only: Ops never retries or re-sends an execution.
+  useEffect(() => {
+    if (!activeGoal || !goalIsActive(activeGoal.status)) return;
+    const goalId = activeGoal.id;
+    let alive = true;
+    const timer = window.setInterval(() => {
+      api
+        .get<GoalView>(`/api/goals/${encodeURIComponent(goalId)}`)
+        .then((goal) => {
+          if (!alive) return;
+          setActiveGoal(goal);
+          if (!goalIsActive(goal.status)) setHistoryVersion((value) => value + 1);
+        })
+        .catch(() => {
+          /* transient poll failure; the next tick retries */
+        });
+    }, ACTIVE_POLL_MS);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [activeGoal?.id, activeGoal?.status]);
+
+  useEffect(() => {
+    if (activeGoal?.status !== "approved") {
+      setExecuteOpen(false);
+      setExecuteConfirmed(false);
+    }
+  }, [activeGoal?.status]);
+
   const resetApprovalFields = () => {
     setApprovalCode("");
     setPassphrase("");
@@ -232,8 +363,21 @@ export function GoalsPage() {
       setPreviewError("Template belum tersedia dari server.");
       return;
     }
-    if (!selectedGuest) {
-      setPreviewError("Pilih guest target terlebih dahulu.");
+    if (!selectedTarget) {
+      setPreviewError(
+        targetKind === "k8s_deployment"
+          ? "Pilih Deployment target terlebih dahulu."
+          : "Pilih guest target terlebih dahulu."
+      );
+      return;
+    }
+    const targetPayload = selectedDeployment
+      ? { namespace: selectedDeployment.namespace, deployment: selectedDeployment.deployment }
+      : selectedGuest
+        ? { vmid: selectedGuest.vmid }
+        : null;
+    if (!targetPayload) {
+      setPreviewError("Target tidak valid untuk template ini.");
       return;
     }
     const missing = missingVariables(template, variables);
@@ -253,7 +397,7 @@ export function GoalsPage() {
     try {
       const response = await api.post<GoalPreviewResponse>("/api/goals/preview", {
         template_id: template.id,
-        target: { vmid: selectedGuest.vmid },
+        target: targetPayload,
         goal: goal.trim(),
         variables: payloadVariables
       });
@@ -398,6 +542,50 @@ export function GoalsPage() {
     }
   };
 
+  const submitExecute = async () => {
+    if (!activeGoal || !executeConfirmed) return;
+    setBusy("execute");
+    setActionError(null);
+    setExecuteError(null);
+    try {
+      const response = await api.post<GoalActionResponse>(
+        `/api/goals/${encodeURIComponent(activeGoal.id)}/execute`,
+        { plan_hash: activeGoal.plan_hash, confirm: true }
+      );
+      setActiveGoal(response.goal);
+      setExecuteOpen(false);
+      setExecuteConfirmed(false);
+      reloadHistory();
+      toast(
+        response.goal.status === "dispatching"
+          ? "Eksekusi dikirim ke healer; memantau journal…"
+          : `Healer menjawab: ${goalStatusLabel(response.goal.status)}`
+      );
+    } catch (error) {
+      setExecuteError(errorMessage(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const submitReconcile = async () => {
+    if (!activeGoal) return;
+    setBusy("reconcile");
+    setActionError(null);
+    try {
+      const response = await api.post<GoalActionResponse>(
+        `/api/goals/${encodeURIComponent(activeGoal.id)}/reconcile`
+      );
+      setActiveGoal(response.goal);
+      reloadHistory();
+      toast(`Reconcile: ${goalStatusLabel(response.goal.status)}`);
+    } catch (error) {
+      setActionError(errorMessage(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   if (!goalsEnabled) {
     return (
       <>
@@ -505,7 +693,7 @@ export function GoalsPage() {
                   value={template?.id ?? ""}
                   onChange={(event) => {
                     setTemplateId(event.target.value);
-                    setTargetVmid("");
+                    setTargetKey("");
                   }}
                   disabled={!templates.length}
                 >
@@ -523,28 +711,61 @@ export function GoalsPage() {
               </div>
 
               <div className="field">
-                <label htmlFor="goal-target">Target guest</label>
+                <label htmlFor="goal-target">
+                  {targetKind === "k8s_deployment" ? "Target deployment" : "Target guest"}
+                </label>
                 <select
                   className="select"
                   id="goal-target"
-                  value={targetVmid}
-                  onChange={(event) => setTargetVmid(event.target.value)}
-                  disabled={!guests.length}
+                  value={targetKey}
+                  onChange={(event) => setTargetKey(event.target.value)}
+                  disabled={!targetRows.length}
                 >
-                  <option value="">{guests.length ? "Pilih guest…" : "memuat guest…"}</option>
-                  {guests.map((guest) => (
-                    <option key={guest.vmid} value={guest.vmid}>
-                      #{guest.vmid} · {guest.name || "guest"} · {guest.node} · {guest.status}
-                      {protectIds.has(guest.vmid) ? " · PROTECT" : autoIds.has(guest.vmid) ? " · AUTO" : ""}
-                    </option>
-                  ))}
+                  <option value="">
+                    {targetRows.length
+                      ? targetKind === "k8s_deployment"
+                        ? "Pilih deployment…"
+                        : "Pilih guest…"
+                      : "memuat target…"}
+                  </option>
+                  {targetRows.map((row) => {
+                    if (isK8sTargetOption(row)) {
+                      const key = goalTargetOptionKey(row);
+                      return (
+                        <option key={key} value={key} disabled={!row.allowed && !row.protected}>
+                          {row.namespace}/{row.deployment} · rev {row.revision}
+                          {row.previous_revision ? ` → ${row.previous_revision}` : ""} · {row.status}
+                          {row.protected ? " · PROTECT" : !row.allowed ? " · not allowed" : ""}
+                          {row.ok ? "" : " · healer error"}
+                        </option>
+                      );
+                    }
+                    return (
+                      <option key={goalTargetOptionKey(row)} value={goalTargetOptionKey(row)}>
+                        #{row.vmid} · {row.name || "guest"} · {row.node} · {row.status}
+                        {row.protected ? " · PROTECT" : row.auto ? " · AUTO" : ""}
+                      </option>
+                    );
+                  })}
                 </select>
                 <span className="hint">
-                  {selectedGuest
-                    ? `${selectedGuest.node} · ${selectedGuest.status}${
-                        selectedProtected ? " · PROTECT (preview akan diblokir)" : selectedAuto ? " · AUTO_IDS" : " · non-AUTO (high risk)"
+                  {selectedDeployment
+                    ? `${selectedDeployment.status} · rev ${selectedDeployment.revision} → ${
+                        selectedDeployment.previous_revision || "—"
+                      } · ${selectedDeployment.available}/${selectedDeployment.replicas} available${
+                        selectedProtected ? " · PROTECT (preview akan diblokir)" : ""
                       }`
-                    : "Target tidak bisa diubah oleh AI; server me-resolve node dan jenis guest."}
+                    : selectedGuest
+                      ? `${selectedGuest.node} · ${selectedGuest.status}${
+                          selectedProtected
+                            ? " · PROTECT (preview akan diblokir)"
+                            : selectedAuto
+                              ? " · AUTO_IDS"
+                              : " · non-AUTO (high risk)"
+                        }`
+                      : targetKind === "k8s_deployment"
+                        ? "Target tidak bisa diubah oleh AI; server me-recheck revision dan image sebelum plan disimpan."
+                        : "Target tidak bisa diubah oleh AI; server me-resolve node dan jenis guest."}
                 </span>
               </div>
             </div>
@@ -653,9 +874,19 @@ export function GoalsPage() {
             <div className="ro-note">
               <Icon name="i-shield" className="icon sm" />
               <span>
-                AI hanya boleh memilih <b>start</b>, <b>resume</b>, <b>reset</b>, <b>noop</b>, atau{" "}
-                <b>escalate</b>. Tidak ada shell, SSH, URL, atau PromQL dari input ini. PROTECT selalu
-                menang.
+                {targetKind === "k8s_deployment" ? (
+                  <>
+                    AI hanya boleh memilih <b>rollout_undo</b>, <b>noop</b>, atau <b>escalate</b>.
+                    Target dan revision ditentukan server; tidak ada kubectl, shell, SSH, URL, atau
+                    PromQL dari input ini. K8S_PROTECT selalu menang.
+                  </>
+                ) : (
+                  <>
+                    AI hanya boleh memilih <b>start</b>, <b>resume</b>, <b>reset</b>, <b>noop</b>, atau{" "}
+                    <b>escalate</b>. Tidak ada shell, SSH, URL, atau PromQL dari input ini. PROTECT
+                    selalu menang.
+                  </>
+                )}
               </span>
             </div>
 
@@ -669,7 +900,7 @@ export function GoalsPage() {
               <button
                 className="btn btn-primary"
                 type="submit"
-                disabled={busy !== null || !template || !selectedGuest}
+                disabled={busy !== null || !template || !selectedTarget}
               >
                 {busy === "preview" ? "Menyusun plan…" : "Preview plan"} <Icon name="i-arrow-right" />
               </button>
@@ -679,10 +910,15 @@ export function GoalsPage() {
             </div>
           </form>
 
-          {guestsApi.error && !guestsApi.data ? (
+          {targetsApi.error && !targetsApi.data ? (
             <div className="ro-note">
               <Icon name="i-alert-triangle" className="icon sm" />
-              <span>Guest list gagal dimuat: {guestsApi.error}</span>
+              <span>Target list gagal dimuat: {targetsApi.error}</span>
+            </div>
+          ) : targetsApi.data?.error ? (
+            <div className="ro-note">
+              <Icon name="i-alert-triangle" className="icon sm" />
+              <span>{goalBlockedLabel(targetsApi.data.error)}</span>
             </div>
           ) : null}
         </Panel>
@@ -877,17 +1113,168 @@ export function GoalsPage() {
               ) : null}
 
               {activeGoal.status === "approved" ? (
-                <div className="ro-note">
-                  <Icon name="i-check-circle" className="icon sm" />
+                <div className="goal-execute">
+                  <div className="ro-note">
+                    <Icon name="i-check-circle" className="icon sm" />
+                    <span>
+                      Disetujui oleh <b>{activeGoal.approved_by || "—"}</b> pada{" "}
+                      {dateTimeOf(activeGoal.approved_at)}.{" "}
+                      {activeGoal.execution_enabled
+                        ? "Eksekusi adalah klik kedua yang terpisah; healer tetap memvalidasi ulang PROTECT, state, dan cooldown."
+                        : "GOALS_EXECUTE_ENABLED=false — eksekusi tidak tersedia; tidak ada aksi yang dikirim ke healer."}
+                    </span>
+                  </div>
+
+                  {activeGoal.execution_enabled ? (
+                    activeGoal.can_execute ? (
+                      executeOpen ? (
+                        <div className="goal-confirm-execute" role="group" aria-label="Konfirmasi eksekusi">
+                          <div className="goal-confirm-head">
+                            <Icon name="i-alert-triangle" className="icon sm" />
+                            <span>
+                              Klik di bawah mengirim plan ini ke healer. Tidak ada auto-retry: bila
+                              koneksi putus, status menjadi <b>unknown</b> dan harus di-reconcile.
+                            </span>
+                          </div>
+                          <div className="goal-confirm-meta">
+                            <div>
+                              <span className="k">Aksi</span>
+                              <span className="mono">{activeAction}</span>
+                            </div>
+                            <div>
+                              <span className="k">Target</span>
+                              <span className="mono">
+                                {goalTargetTitle(activeGoal)} · {goalTargetMeta(activeGoal)}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="k">Window</span>
+                              <span className="mono">{remainingLabel(activeGoal.execute_before, now)}</span>
+                            </div>
+                            <div>
+                              <span className="k">Plan hash</span>
+                              <span className="mono">{activeGoal.plan_hash.slice(0, 16)}…</span>
+                            </div>
+                          </div>
+                          <label className="checkline">
+                            <input
+                              type="checkbox"
+                              checked={executeConfirmed}
+                              onChange={(event) => setExecuteConfirmed(event.target.checked)}
+                            />
+                            <span>
+                              {activeGoal.target_kind === "k8s_deployment"
+                                ? "Saya mengerti aksi ini mengubah Deployment dan tidak dapat dibatalkan lewat Ops."
+                                : "Saya mengerti aksi ini mengubah guest dan tidak dapat dibatalkan lewat Ops."}
+                            </span>
+                          </label>
+                          {executeError ? (
+                            <div className="auth-error" role="alert">
+                              <Icon name="i-alert-triangle" className="icon sm" /> {executeError}
+                            </div>
+                          ) : null}
+                          <div className="goal-actions">
+                            <button
+                              className="btn btn-primary"
+                              type="button"
+                              onClick={() => void submitExecute()}
+                              disabled={busy !== null || !executeConfirmed}
+                            >
+                              <Icon name="i-play" />{" "}
+                              {busy === "execute" ? "Mengirim ke healer…" : `Execute ${activeAction}`}
+                            </button>
+                            <button
+                              className="btn"
+                              type="button"
+                              onClick={() => {
+                                setExecuteOpen(false);
+                                setExecuteConfirmed(false);
+                                setExecuteError(null);
+                              }}
+                              disabled={busy === "execute"}
+                            >
+                              <Icon name="i-x" /> Batal
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="goal-actions">
+                          <button
+                            className="btn btn-primary"
+                            type="button"
+                            onClick={() => {
+                              setExecuteOpen(true);
+                              setExecuteError(null);
+                            }}
+                          >
+                            <Icon name="i-play" /> Execute…
+                          </button>
+                          <span className="hint">
+                            Membuka konfirmasi kedua; tidak ada auto-execute setelah approval.
+                          </span>
+                        </div>
+                      )
+                    ) : (
+                      <div className="ro-note">
+                        <Icon name="i-lock" className="icon sm" />
+                        <span>
+                          Hanya approver yang dapat mengeksekusi, dan window eksekusi harus masih
+                          berlaku. Hubungi approver lain bila tombol tidak muncul.
+                        </span>
+                      </div>
+                    )
+                  ) : null}
+                </div>
+              ) : null}
+
+              {goalIsActive(activeGoal.status) ? (
+                <div className="ro-note goal-progress" role="status">
+                  <span className="spinner" aria-hidden="true" />
                   <span>
-                    Disetujui oleh <b>{activeGoal.approved_by || "—"}</b> pada{" "}
-                    {dateTimeOf(activeGoal.approved_at)}.{" "}
-                    {activeGoal.execution_enabled
-                      ? "Eksekusi adalah klik kedua yang terpisah dan belum tersedia di UI fase ini."
-                      : "GOALS_EXECUTE_ENABLED=false — eksekusi tidak tersedia; tidak ada aksi yang dikirim ke healer."}
+                    Healer memproses plan ini. Ops memantau journal tiap {ACTIVE_POLL_MS / 1000} detik;
+                    tidak ada retry otomatis. Run: <b>{goalRunLabel(activeGoal.run)}</b>.
                   </span>
                 </div>
               ) : null}
+
+              {activeGoal.status === "unknown" ? (
+                <div className="goal-unknown">
+                  <div className="ro-note">
+                    <Icon name="i-alert-triangle" className="icon sm" />
+                    <span>
+                      Hasil eksekusi belum pasti — Ops <b>tidak</b> mengulang aksi secara otomatis.
+                      Reconcile hanya membaca journal healer dan tidak memicu eksekusi baru.
+                    </span>
+                  </div>
+                  {activeGoal.can_reconcile ? (
+                    <div className="goal-actions">
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => void submitReconcile()}
+                        disabled={busy !== null}
+                      >
+                        <Icon name="i-refresh" />{" "}
+                        {busy === "reconcile" ? "Memeriksa journal…" : "Reconcile journal"}
+                      </button>
+                      <span className="hint">GET /runs/{`{plan_id}`} · read-only</span>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {activeGoal.status === "succeeded" ? (
+                <div className="ro-note">
+                  <Icon name="i-check-circle" className="icon sm" />
+                  <span>
+                    Healer menyelesaikan aksi{" "}
+                    {activeGoal.run?.dry_run ? "(DRY_RUN — target tidak diubah)" : ""}. Hasil
+                    lengkap ada di run journal di bawah.
+                  </span>
+                </div>
+              ) : null}
+
+              <GoalRunView run={activeGoal.run} />
 
               {activeGoal.status === "rejected" ||
               activeGoal.status === "cancelled" ||
@@ -904,7 +1291,9 @@ export function GoalsPage() {
                         ? `Dibatalkan: ${activeGoal.reject_reason || "tanpa alasan"}`
                         : activeGoal.status === "expired"
                           ? "Goal kedaluwarsa sebelum disetujui / dieksekusi."
-                          : `Goal gagal: ${activeGoal.error || "tanpa detail"}`}
+                          : `Goal gagal${activeGoal.run?.error_code ? ` (${activeGoal.run.error_code})` : ""}: ${
+                              activeGoal.error || "tanpa detail"
+                            }`}
                   </span>
                 </div>
               ) : null}
@@ -1006,7 +1395,11 @@ export function GoalsPage() {
               </span>
               <div>
                 <div className="agent-name">Belum ada plan</div>
-                <div className="agent-sub">pilih guest, isi variabel, lalu preview</div>
+                <div className="agent-sub">
+                  {targetKind === "k8s_deployment"
+                    ? "pilih deployment, isi variabel, lalu preview"
+                    : "pilih guest, isi variabel, lalu preview"}
+                </div>
               </div>
             </div>
           )}
@@ -1025,7 +1418,7 @@ export function GoalsPage() {
               <tr>
                 <th>#</th>
                 <th>Status</th>
-                <th>Guest</th>
+                <th>Target</th>
                 <th>Action</th>
                 <th>Requested by</th>
                 <th>Created</th>
@@ -1065,13 +1458,8 @@ export function GoalsPage() {
                         </Pill>
                       </td>
                       <td>
-                        <div className="agent-name">
-                          {item.target?.name || item.plan?.target?.name || "guest"}
-                        </div>
-                        <div className="agent-sub">
-                          #{item.target?.vmid ?? item.plan?.target?.vmid ?? "—"} ·{" "}
-                          {item.target?.node ?? item.plan?.target?.node ?? "—"}
-                        </div>
+                        <div className="agent-name">{goalTargetTitle(item)}</div>
+                        <div className="agent-sub">{goalTargetMeta(item)}</div>
                       </td>
                       <td>
                         <Pill tone={goalRiskTone(step?.risk ?? "low")}>{step?.action ?? "—"}</Pill>
@@ -1133,15 +1521,12 @@ export function GoalsPage() {
             <>
               <div className="drawer-hero">
                 <span className="agent-avatar violet">
-                  <Icon name="i-target" />
+                  <Icon name={drawerGoal.target_kind === "k8s_deployment" ? "i-wheel" : "i-target"} />
                 </span>
                 <div>
-                  <div className="name">
-                    {drawerGoal.target?.name || drawerGoal.plan?.target?.name || "goal"}
-                  </div>
+                  <div className="name">{goalTargetTitle(drawerGoal)}</div>
                   <div className="sub">
-                    #{drawerGoal.target?.vmid ?? drawerGoal.plan?.target?.vmid ?? "—"} ·{" "}
-                    {drawerGoal.template_id}
+                    {goalTargetMeta(drawerGoal)} · {drawerGoal.template_id}
                   </div>
                 </div>
                 <Pill
@@ -1183,10 +1568,20 @@ export function GoalsPage() {
                 <div>
                   <div className="k">Execution</div>
                   <div className="v" style={{ fontSize: 11 }}>
-                    {drawerGoal.execution_enabled ? drawerGoal.status : "disabled"}
+                    {drawerGoal.execution_enabled ? goalRunLabel(drawerGoal.run) : "disabled"}
                   </div>
                 </div>
+                <div>
+                  <div className="k">Execute by</div>
+                  <div className="v">{drawerGoal.execute_by || "—"}</div>
+                </div>
+                <div>
+                  <div className="k">Execute count</div>
+                  <div className="v">{drawerGoal.execute_count || 0}</div>
+                </div>
               </div>
+
+              <GoalRunView run={drawerGoal.run} />
 
               {drawerGoal.reject_reason ? (
                 <div className="ro-note">

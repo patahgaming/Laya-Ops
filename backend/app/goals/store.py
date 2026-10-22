@@ -16,9 +16,9 @@ import secrets
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 APPROVAL_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 SCHEMA = """
@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS goal_previews (
     expires_at TEXT NOT NULL,
     template_id TEXT NOT NULL,
     template_version TEXT NOT NULL,
+    target_kind TEXT NOT NULL DEFAULT 'proxmox_guest',
     target_vmid INTEGER NOT NULL,
     target_node TEXT NOT NULL,
     target_type TEXT NOT NULL,
@@ -66,7 +67,9 @@ CREATE TABLE IF NOT EXISTS goal_requests (
     goal TEXT NOT NULL,
     variables_json TEXT NOT NULL,
     plan_json TEXT NOT NULL,
+    plan_id TEXT NOT NULL DEFAULT '',
     plan_hash TEXT NOT NULL,
+    target_kind TEXT NOT NULL DEFAULT 'proxmox_guest',
     evidence_hash TEXT NOT NULL,
     warnings_json TEXT NOT NULL,
     approval_code_salt TEXT NOT NULL,
@@ -82,6 +85,10 @@ CREATE TABLE IF NOT EXISTS goal_requests (
     rejected_at TEXT NOT NULL DEFAULT '',
     reject_reason TEXT NOT NULL DEFAULT '',
     execute_before TEXT NOT NULL DEFAULT '',
+    execute_requested_at TEXT NOT NULL DEFAULT '',
+    execute_by_sub TEXT NOT NULL DEFAULT '',
+    execute_by_name TEXT NOT NULL DEFAULT '',
+    execute_count INTEGER NOT NULL DEFAULT 0,
     idempotency_key TEXT NOT NULL,
     run_id TEXT NOT NULL DEFAULT '',
     result_json TEXT NOT NULL DEFAULT '',
@@ -97,10 +104,18 @@ CREATE TABLE IF NOT EXISTS goal_runs (
     plan_id TEXT NOT NULL,
     status TEXT NOT NULL,
     claimed_at TEXT NOT NULL,
+    request_sent_at TEXT NOT NULL DEFAULT '',
+    accepted_at TEXT NOT NULL DEFAULT '',
     started_at TEXT NOT NULL DEFAULT '',
     finished_at TEXT NOT NULL DEFAULT '',
+    heartbeat_at TEXT NOT NULL DEFAULT '',
+    last_polled_at TEXT NOT NULL DEFAULT '',
+    lease_owner TEXT NOT NULL DEFAULT '',
+    lease_expires_at TEXT NOT NULL DEFAULT '',
     result_json TEXT NOT NULL DEFAULT '',
     error TEXT NOT NULL DEFAULT '',
+    error_code TEXT NOT NULL DEFAULT '',
+    dry_run INTEGER NOT NULL DEFAULT 0,
     attempts INTEGER NOT NULL DEFAULT 1
 );
 
@@ -108,6 +123,7 @@ CREATE TABLE IF NOT EXISTS goal_audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,
     goal_id TEXT NOT NULL,
+    plan_id TEXT NOT NULL DEFAULT '',
     actor_sub TEXT NOT NULL,
     actor_name TEXT NOT NULL,
     actor_method TEXT NOT NULL,
@@ -121,6 +137,43 @@ CREATE INDEX IF NOT EXISTS idx_goal_requests_status ON goal_requests(status);
 CREATE INDEX IF NOT EXISTS idx_goal_requests_owner ON goal_requests(requested_by_sub, requested_at);
 CREATE INDEX IF NOT EXISTS idx_goal_audit_goal ON goal_audit(goal_id, id);
 """
+
+# Indexes yang memakai kolom v2 harus dibuat setelah migrasi, bukan di SCHEMA:
+# database v1 belum punya kolom-kolom itu dan CREATE INDEX akan gagal.
+SCHEMA_V2_INDEXES = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_goal_requests_plan
+    ON goal_requests(plan_id) WHERE plan_id != '';
+CREATE INDEX IF NOT EXISTS idx_goal_runs_lease
+    ON goal_runs(status, lease_expires_at);
+"""
+
+_V2_GOAL_COLUMNS = {
+    "plan_id": "TEXT NOT NULL DEFAULT ''",
+    "target_kind": "TEXT NOT NULL DEFAULT 'proxmox_guest'",
+    "execute_requested_at": "TEXT NOT NULL DEFAULT ''",
+    "execute_by_sub": "TEXT NOT NULL DEFAULT ''",
+    "execute_by_name": "TEXT NOT NULL DEFAULT ''",
+    "execute_count": "INTEGER NOT NULL DEFAULT 0",
+}
+
+_V2_RUN_COLUMNS = {
+    "request_sent_at": "TEXT NOT NULL DEFAULT ''",
+    "accepted_at": "TEXT NOT NULL DEFAULT ''",
+    "heartbeat_at": "TEXT NOT NULL DEFAULT ''",
+    "last_polled_at": "TEXT NOT NULL DEFAULT ''",
+    "lease_owner": "TEXT NOT NULL DEFAULT ''",
+    "lease_expires_at": "TEXT NOT NULL DEFAULT ''",
+    "error_code": "TEXT NOT NULL DEFAULT ''",
+    "dry_run": "INTEGER NOT NULL DEFAULT 0",
+}
+
+_V2_AUDIT_COLUMNS = {
+    "plan_id": "TEXT NOT NULL DEFAULT ''",
+}
+
+_V3_PREVIEW_COLUMNS = {
+    "target_kind": "TEXT NOT NULL DEFAULT 'proxmox_guest'",
+}
 
 
 def generate_approval_code() -> str:
@@ -155,6 +208,7 @@ class Store:
             except OSError:
                 pass
             conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            conn.isolation_level = None
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA foreign_keys=ON")
@@ -164,15 +218,44 @@ class Store:
             row = conn.execute("SELECT version FROM schema_meta LIMIT 1").fetchone()
             if row is None:
                 conn.execute("INSERT INTO schema_meta(version) VALUES (?)", (SCHEMA_VERSION,))
-            elif int(row["version"]) > SCHEMA_VERSION:
-                raise RuntimeError(
-                    f"goals database schema v{int(row['version'])} is newer than this app"
-                )
+            else:
+                version = int(row["version"])
+                if version > SCHEMA_VERSION:
+                    raise RuntimeError(
+                        f"goals database schema v{version} is newer than this app"
+                    )
+                if version < SCHEMA_VERSION:
+                    self._migrate(conn, version)
+            conn.executescript(SCHEMA_V2_INDEXES)
             conn.commit()
             try:
                 os.chmod(self.db_path, 0o600)
             except OSError:
                 pass
+
+    def _migrate(self, conn: sqlite3.Connection, version: int) -> None:
+        """Forward-only in-place migration; never drops plan or audit data."""
+        if version < 2:
+            self._add_columns(conn, "goal_requests", _V2_GOAL_COLUMNS)
+            self._add_columns(conn, "goal_runs", _V2_RUN_COLUMNS)
+            self._add_columns(conn, "goal_audit", _V2_AUDIT_COLUMNS)
+            conn.execute("UPDATE goal_requests SET plan_id = id WHERE plan_id = ''")
+            conn.execute("UPDATE schema_meta SET version = 2")
+        if version < 3:
+            self._add_columns(conn, "goal_previews", _V3_PREVIEW_COLUMNS)
+            conn.execute("UPDATE schema_meta SET version = 3")
+
+    @staticmethod
+    def _add_columns(
+        conn: sqlite3.Connection, table: str, columns: dict[str, str]
+    ) -> None:
+        existing = {
+            str(row["name"])
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        for name, ddl in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
     def close(self) -> None:
         with self._lock:
@@ -187,19 +270,23 @@ class Store:
 
     # ------------------------------------------------------------- previews
     def create_preview(self, record: dict[str, Any]) -> None:
+        record = dict(record)
+        record.setdefault("target_kind", "proxmox_guest")
         with self._lock:
             self._db().execute(
                 """
                 INSERT INTO goal_previews (
                     id, created_by_sub, created_by_name, created_at, expires_at,
-                    template_id, template_version, target_vmid, target_node, target_type,
-                    goal, variables_json, plan_json, plan_hash, evidence_json,
-                    evidence_hash, warnings_json, status, blocked_reason, used
+                    template_id, template_version, target_kind, target_vmid,
+                    target_node, target_type, goal, variables_json, plan_json,
+                    plan_hash, evidence_json, evidence_hash, warnings_json,
+                    status, blocked_reason, used
                 ) VALUES (
                     :id, :created_by_sub, :created_by_name, :created_at, :expires_at,
-                    :template_id, :template_version, :target_vmid, :target_node, :target_type,
-                    :goal, :variables_json, :plan_json, :plan_hash, :evidence_json,
-                    :evidence_hash, :warnings_json, :status, :blocked_reason, 0
+                    :template_id, :template_version, :target_kind, :target_vmid,
+                    :target_node, :target_type, :goal, :variables_json, :plan_json,
+                    :plan_hash, :evidence_json, :evidence_hash, :warnings_json,
+                    :status, :blocked_reason, 0
                 )
                 """,
                 record,
@@ -225,6 +312,9 @@ class Store:
     # --------------------------------------------------------------- goals
     def create_goal(self, record: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         """Insert a goal; replaying the same user idempotency key returns the old row."""
+        record = dict(record)
+        record.setdefault("plan_id", record["id"])
+        record.setdefault("target_kind", "proxmox_guest")
         with self._lock:
             try:
                 self._db().execute(
@@ -233,16 +323,16 @@ class Store:
                         id, preview_id, status, requested_by_sub, requested_by_name,
                         requested_at, expires_at, template_id, template_version,
                         target_vmid, target_node, target_type, target_json, goal,
-                        variables_json, plan_json, plan_hash, evidence_hash, warnings_json,
-                        approval_code_salt, approval_code_hash, idempotency_key,
-                        created_at, updated_at
+                        variables_json, plan_json, plan_id, plan_hash, target_kind,
+                        evidence_hash, warnings_json, approval_code_salt,
+                        approval_code_hash, idempotency_key, created_at, updated_at
                     ) VALUES (
                         :id, :preview_id, :status, :requested_by_sub, :requested_by_name,
                         :requested_at, :expires_at, :template_id, :template_version,
                         :target_vmid, :target_node, :target_type, :target_json, :goal,
-                        :variables_json, :plan_json, :plan_hash, :evidence_hash, :warnings_json,
-                        :approval_code_salt, :approval_code_hash, :idempotency_key,
-                        :created_at, :updated_at
+                        :variables_json, :plan_json, :plan_id, :plan_hash, :target_kind,
+                        :evidence_hash, :warnings_json, :approval_code_salt,
+                        :approval_code_hash, :idempotency_key, :created_at, :updated_at
                     )
                     """,
                     record,
@@ -316,7 +406,7 @@ class Store:
             ).fetchone()
         return int(row["n"]) if row else 0
 
-    _GOAL_UPDATABLE = {
+    _GOAL_UPDATABLE: ClassVar[set[str]] = {
         "status",
         "approved_by_sub",
         "approved_by_name",
@@ -326,6 +416,10 @@ class Store:
         "rejected_at",
         "reject_reason",
         "execute_before",
+        "execute_requested_at",
+        "execute_by_sub",
+        "execute_by_name",
+        "execute_count",
         "run_id",
         "result_json",
         "error",
@@ -393,16 +487,115 @@ class Store:
             self._db().execute(
                 """
                 INSERT INTO goal_runs (
-                    id, goal_id, plan_id, status, claimed_at, started_at,
-                    finished_at, result_json, error, attempts
+                    id, goal_id, plan_id, status, claimed_at, request_sent_at,
+                    accepted_at, started_at, finished_at, heartbeat_at,
+                    last_polled_at, lease_owner, lease_expires_at, result_json,
+                    error, error_code, dry_run, attempts
                 ) VALUES (
-                    :id, :goal_id, :plan_id, :status, :claimed_at, :started_at,
-                    :finished_at, :result_json, :error, 1
+                    :id, :goal_id, :plan_id, :status, :claimed_at, :request_sent_at,
+                    :accepted_at, :started_at, :finished_at, :heartbeat_at,
+                    :last_polled_at, :lease_owner, :lease_expires_at, :result_json,
+                    :error, :error_code, :dry_run, 1
                 )
                 """,
                 record,
             )
             self._db().commit()
+
+    def claim_execution(
+        self,
+        goal_id: str,
+        *,
+        plan_hash: str,
+        now: str,
+        actor_sub: str,
+        actor_name: str,
+        run_id: str,
+        lease_owner: str,
+        lease_expires_at: str,
+    ) -> dict[str, Any] | None:
+        """Atomically move approved -> dispatching and create exactly one run.
+
+        ``BEGIN IMMEDIATE`` makes the check-and-claim one transaction, so two
+        approvers clicking Execute can never both dispatch. Returns None when
+        the goal is not approved, the hash changed, or the window expired.
+        """
+        with self._lock:
+            conn = self._db()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    "SELECT * FROM goal_requests WHERE id = ?", (goal_id,)
+                ).fetchone()
+                if row is None:
+                    conn.execute("ROLLBACK")
+                    return None
+                if str(row["status"]) != "approved":
+                    conn.execute("ROLLBACK")
+                    return None
+                if str(row["plan_hash"]) != plan_hash:
+                    conn.execute("ROLLBACK")
+                    return None
+                execute_before = str(row["execute_before"] or "")
+                if not execute_before or execute_before <= now:
+                    conn.execute("ROLLBACK")
+                    return None
+                existing = conn.execute(
+                    "SELECT id FROM goal_runs WHERE goal_id = ?", (goal_id,)
+                ).fetchone()
+                effective_run_id = str(existing["id"]) if existing is not None else run_id
+                cur = conn.execute(
+                    """
+                    UPDATE goal_requests
+                       SET status = 'dispatching', execute_requested_at = ?,
+                           execute_by_sub = ?, execute_by_name = ?,
+                           run_id = ?, execute_count = execute_count + 1,
+                           updated_at = ?
+                     WHERE id = ? AND status = 'approved'
+                    """,
+                    (now, actor_sub, actor_name, effective_run_id, now, goal_id),
+                )
+                if cur.rowcount != 1:
+                    conn.execute("ROLLBACK")
+                    return None
+                if existing is not None:
+                    # Retry after a retryable control rejection (busy/cooldown):
+                    # the goal returned to approved, the same run row is reused.
+                    conn.execute(
+                        """
+                        UPDATE goal_runs
+                           SET status = 'dispatching', claimed_at = ?,
+                               request_sent_at = ?, accepted_at = '',
+                               started_at = '', finished_at = '', heartbeat_at = ?,
+                               last_polled_at = '', lease_owner = ?,
+                               lease_expires_at = ?, result_json = '', error = '',
+                               error_code = '', dry_run = 0,
+                               attempts = attempts + 1
+                         WHERE goal_id = ?
+                        """,
+                        (now, now, now, lease_owner, lease_expires_at, goal_id),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO goal_runs (
+                            id, goal_id, plan_id, status, claimed_at, request_sent_at,
+                            accepted_at, started_at, finished_at, heartbeat_at,
+                            last_polled_at, lease_owner, lease_expires_at, result_json,
+                            error, error_code, dry_run, attempts
+                        ) VALUES (?, ?, ?, 'dispatching', ?, ?, '', '', '', ?, '', ?, ?, '', '', '', 0, 1)
+                        """,
+                        (run_id, goal_id, str(row["plan_id"] or goal_id), now, now,
+                         now, lease_owner, lease_expires_at),
+                    )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        return {
+            "goal": self.get_goal(goal_id),
+            "run": self.get_run(goal_id),
+        }
 
     def get_run(self, goal_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -411,20 +604,60 @@ class Store:
             ).fetchone()
         return _run_row(row)
 
-    def update_run(self, goal_id: str, fields: dict[str, Any]) -> None:
-        allowed = {"status", "started_at", "finished_at", "result_json", "error", "attempts"}
-        unknown = set(fields) - allowed
+    _RUN_UPDATABLE: ClassVar[set[str]] = {
+        "status",
+        "started_at",
+        "finished_at",
+        "request_sent_at",
+        "accepted_at",
+        "heartbeat_at",
+        "last_polled_at",
+        "lease_owner",
+        "lease_expires_at",
+        "result_json",
+        "error",
+        "error_code",
+        "dry_run",
+        "attempts",
+    }
+
+    def update_run(
+        self,
+        goal_id: str,
+        fields: dict[str, Any],
+        *,
+        expected_status: str | None = None,
+    ) -> dict[str, Any] | None:
+        unknown = set(fields) - self._RUN_UPDATABLE
         if unknown:
             raise ValueError(f"unknown run fields: {sorted(unknown)}")
         if not fields:
-            return
+            return self.get_run(goal_id)
         assignments = ", ".join(f"{key} = ?" for key in fields)
+        sql = f"UPDATE goal_runs SET {assignments} WHERE goal_id = ?"
+        params: list[Any] = list(fields.values()) + [goal_id]
+        if expected_status is not None:
+            sql += " AND status = ?"
+            params.append(expected_status)
         with self._lock:
-            self._db().execute(
-                f"UPDATE goal_runs SET {assignments} WHERE goal_id = ?",
-                list(fields.values()) + [goal_id],
+            cur = self._db().execute(sql, params)
+            self._db().commit()
+            if cur.rowcount != 1:
+                return None
+            return self.get_run(goal_id)
+
+    def renew_run_lease(
+        self, goal_id: str, *, owner: str, now: str, lease_expires_at: str
+    ) -> bool:
+        with self._lock:
+            cur = self._db().execute(
+                "UPDATE goal_runs SET heartbeat_at = ?, lease_expires_at = ?, "
+                "last_polled_at = ? WHERE goal_id = ? AND lease_owner = ? "
+                "AND status IN ('dispatching', 'executing')",
+                (now, lease_expires_at, now, goal_id, owner),
             )
             self._db().commit()
+            return cur.rowcount == 1
 
     # --------------------------------------------------------------- audit
     def audit(
@@ -439,18 +672,20 @@ class Store:
         detail: dict[str, Any],
         client_ip: str = "",
         user_agent: str = "",
+        plan_id: str = "",
     ) -> None:
         with self._lock:
             self._db().execute(
                 """
                 INSERT INTO goal_audit (
-                    ts, goal_id, actor_sub, actor_name, actor_method,
+                    ts, goal_id, plan_id, actor_sub, actor_name, actor_method,
                     event, detail_json, client_ip, user_agent
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     ts,
                     goal_id,
+                    plan_id,
                     actor_sub,
                     actor_name,
                     actor_method,
@@ -483,28 +718,84 @@ class Store:
         ]
 
     # -------------------------------------------------------------- sweeper
-    def sweep(self, *, now: str, stale_before: str) -> int:
-        changed = 0
+    def sweep(self, *, now: str, stale_before: str) -> list[dict[str, Any]]:
+        """Expire windows and stale leases. Never marks a run successful."""
+        changes: list[dict[str, Any]] = []
         with self._lock:
-            for sql in (
-                "UPDATE goal_requests SET status = 'expired', updated_at = ? "
-                "WHERE status = 'pending_approval' AND expires_at <= ?",
-                "UPDATE goal_requests SET status = 'expired', updated_at = ? "
-                "WHERE status = 'approved' AND execute_before != '' AND execute_before <= ?",
-                "UPDATE goal_requests SET status = 'unknown', updated_at = ?, "
-                "error = 'startup reconciliation: stale dispatch' "
-                "WHERE status IN ('dispatching', 'executing') AND updated_at <= ?",
-            ):
-                cur = self._db().execute(sql, (now, stale_before))
-                changed += cur.rowcount
-            self._db().commit()
-        return changed
+            conn = self._db()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                for status, table, column, reason in (
+                    ("pending_approval", "goal_requests", "expires_at", "approval_expired"),
+                    ("approved", "goal_requests", "execute_before", "execution_expired"),
+                ):
+                    rows = conn.execute(
+                        f"SELECT id FROM {table} WHERE status = ? AND {column} != '' "
+                        f"AND {column} <= ?",
+                        (status, now),
+                    ).fetchall()
+                    for row in rows:
+                        conn.execute(
+                            "UPDATE goal_requests SET status = 'expired', updated_at = ? "
+                            "WHERE id = ? AND status = ?",
+                            (now, row["id"], status),
+                        )
+                        changes.append(
+                            {
+                                "goal_id": row["id"],
+                                "previous": status,
+                                "status": "expired",
+                                "reason": reason,
+                            }
+                        )
+
+                stale = conn.execute(
+                    """
+                    SELECT g.id AS id, g.status AS status
+                      FROM goal_requests g
+                      LEFT JOIN goal_runs r ON r.goal_id = g.id
+                     WHERE g.status IN ('dispatching', 'executing')
+                       AND (
+                         (r.lease_expires_at IS NOT NULL AND r.lease_expires_at != ''
+                          AND r.lease_expires_at <= ?)
+                         OR ((r.lease_expires_at IS NULL OR r.lease_expires_at = '')
+                             AND g.updated_at <= ?)
+                       )
+                    """,
+                    (now, stale_before),
+                ).fetchall()
+                for row in stale:
+                    conn.execute(
+                        "UPDATE goal_requests SET status = 'unknown', updated_at = ?, "
+                        "error = 'execution lease expired; state is unknown' "
+                        "WHERE id = ? AND status = ?",
+                        (now, row["id"], row["status"]),
+                    )
+                    conn.execute(
+                        "UPDATE goal_runs SET status = 'unknown', finished_at = ?, "
+                        "error = 'execution lease expired', error_code = 'lease_expired' "
+                        "WHERE goal_id = ? AND status IN ('dispatching', 'executing')",
+                        (now, row["id"]),
+                    )
+                    changes.append(
+                        {
+                            "goal_id": row["id"],
+                            "previous": row["status"],
+                            "status": "unknown",
+                            "reason": "lease_expired",
+                        }
+                    )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        return changes
 
 
 def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
-    return {key: row[key] for key in row.keys()}
+    return dict(row)
 
 
 def _run_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -516,10 +807,18 @@ def _run_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
         "plan_id": row["plan_id"],
         "status": row["status"],
         "claimed_at": row["claimed_at"],
+        "request_sent_at": row["request_sent_at"],
+        "accepted_at": row["accepted_at"],
         "started_at": row["started_at"],
         "finished_at": row["finished_at"],
+        "heartbeat_at": row["heartbeat_at"],
+        "last_polled_at": row["last_polled_at"],
+        "lease_owner": row["lease_owner"],
+        "lease_expires_at": row["lease_expires_at"],
         "result": _json(row["result_json"], None),
         "error": row["error"],
+        "error_code": row["error_code"],
+        "dry_run": bool(row["dry_run"]),
         "attempts": row["attempts"],
     }
 

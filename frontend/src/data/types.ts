@@ -332,8 +332,15 @@ export type GoalStatus =
   | "cancelled"
   | "expired";
 
-export type GoalAction = "start" | "resume" | "reset" | "noop" | "escalate";
+export type GoalAction =
+  | "start"
+  | "resume"
+  | "reset"
+  | "rollout_undo"
+  | "noop"
+  | "escalate";
 export type GoalRisk = "low" | "medium" | "high";
+export type GoalTargetKind = "proxmox_guest" | "k8s_deployment";
 
 export interface GoalTemplateVariable {
   name: string;
@@ -367,13 +374,30 @@ export interface GoalTemplatesResponse {
   templates: GoalTemplate[];
 }
 
-export interface GoalPlanTarget {
+/** Target of a Proxmox guest plan step. */
+export interface GuestPlanTarget {
   vmid: number;
   name: string;
   node: string;
   guest_type: "vm" | "ct";
   status: string;
 }
+
+/** Target of a Deployment rollback. Kept separate so a guest plan can never
+ * carry k8s fields and vice versa. */
+export interface K8sPlanTarget {
+  namespace: string;
+  deployment: string;
+  revision: number;
+  previous_revision: number;
+  status: string;
+  replicas: number;
+  available: number;
+  images: string[];
+  previous_images: string[];
+}
+
+export type GoalPlanTarget = GuestPlanTarget | K8sPlanTarget;
 
 export interface GoalPlanStep {
   step_id: string;
@@ -388,6 +412,7 @@ export interface GoalPlanStep {
 export interface GoalPlan {
   template_id: string;
   template_version: string;
+  target_kind?: string;
   goal: string;
   target: GoalPlanTarget;
   variables: Record<string, unknown>;
@@ -405,6 +430,50 @@ export interface GoalTargetSummary {
   guest_type?: string;
   status?: string;
   auto?: boolean;
+  namespace?: string;
+  deployment?: string;
+  revision?: number;
+  previous_revision?: number;
+  replicas?: number;
+  available?: number;
+  images?: string[];
+  previous_images?: string[];
+}
+
+/** Row returned by GET /api/goals/targets for a guest template. */
+export interface GoalGuestTargetOption {
+  vmid: number;
+  name: string;
+  node: string;
+  guest_type: string;
+  status: string;
+  auto: boolean;
+  protected: boolean;
+}
+
+/** Row returned by GET /api/goals/targets for a k8s template. */
+export interface GoalK8sTargetOption {
+  namespace: string;
+  deployment: string;
+  revision: number;
+  previous_revision: number;
+  status: string;
+  replicas: number;
+  available: number;
+  images: string[];
+  previous_images: string[];
+  ok: boolean;
+  allowed: boolean;
+  protected: boolean;
+}
+
+export type GoalTargetOption = GoalGuestTargetOption | GoalK8sTargetOption;
+
+export interface GoalTargetsResponse {
+  template_id: string;
+  target_kind: string;
+  targets: GoalTargetOption[];
+  error: string;
 }
 
 export interface GoalPreviewResponse {
@@ -424,6 +493,27 @@ export interface ApprovalRequirements {
   high_risk: boolean;
   passphrase_required: boolean;
   typed_confirmation: string;
+}
+
+export interface GoalRun {
+  id: string;
+  goal_id: string;
+  plan_id: string;
+  status: string;
+  claimed_at: string;
+  request_sent_at: string;
+  accepted_at: string;
+  started_at: string;
+  finished_at: string;
+  heartbeat_at: string;
+  last_polled_at: string;
+  lease_owner: string;
+  lease_expires_at: string;
+  result: Record<string, unknown> | null;
+  error: string;
+  error_code: string;
+  dry_run: boolean;
+  attempts: number;
 }
 
 export interface GoalView {
@@ -448,13 +538,18 @@ export interface GoalView {
   rejected_at: string;
   reject_reason: string;
   execute_before: string;
-  run: Record<string, unknown> | null;
+  execute_by: string;
+  execute_requested_at: string;
+  execute_count: number;
+  target_kind: string;
+  run: GoalRun | null;
   result: Record<string, unknown> | null;
   error: string;
   created_at: string;
   updated_at: string;
   can_approve: boolean;
   can_execute: boolean;
+  can_reconcile: boolean;
   approval_mode: string;
   execution_enabled: boolean;
   high_risk: boolean;
@@ -492,4 +587,5 @@ export interface GoalActionResponse {
   ok: boolean;
   goal: GoalView;
   message: string;
+  accepted: boolean;
 }

@@ -32,6 +32,17 @@ class TargetRef(_Strict):
     vmid: int = Field(ge=1, le=999_999)
 
 
+# DNS-1123 subset. The healer re-validates; this only keeps the request shape
+# strict before it ever reaches the upstream.
+_NAMESPACE_RE = r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
+_DEPLOYMENT_RE = r"^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$"
+
+
+class K8sTargetRef(_Strict):
+    namespace: str = Field(pattern=_NAMESPACE_RE)
+    deployment: str = Field(pattern=_DEPLOYMENT_RE)
+
+
 class RecoverVariables(_Strict):
     reason: str = Field(min_length=1, max_length=200)
     expected_effect: Literal["running", "reachable"] = "running"
@@ -46,11 +57,34 @@ class RecoverVariables(_Strict):
         return cleaned
 
 
+class K8sRollbackVariables(_Strict):
+    reason: str = Field(min_length=1, max_length=200)
+    expected_effect: Literal["available"] = "available"
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_not_blank(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("reason must not be blank")
+        return cleaned
+
+
 class PreviewRequest(_Strict):
     template_id: str = Field(min_length=1, max_length=64)
-    target: TargetRef
+    # The concrete shape depends on the template's target_kind. The service
+    # validates it with the strict model for that template and maps failures
+    # to 422, so a guest target can never be accepted for a k8s template.
+    target: dict[str, Any]
     goal: str = Field(default="", max_length=1000)
-    variables: RecoverVariables
+    variables: dict[str, Any]
+
+
+class TargetsResponse(BaseModel):
+    template_id: str
+    target_kind: str
+    targets: list[dict[str, Any]] = Field(default_factory=list)
+    error: str = ""
 
 
 class CreateGoalRequest(_Strict):
@@ -117,6 +151,45 @@ class Plan(BaseModel):
     rationale: str = ""
     warnings: list[str] = Field(default_factory=list)
     generated_by: Literal["rules", "llm"] = "rules"
+    evidence_hash: str = ""
+
+
+class K8sPlanTarget(BaseModel):
+    """Target for a Deployment rollback. Distinct from PlanTarget on purpose:
+    a guest plan can never carry k8s fields and vice versa."""
+
+    namespace: str
+    deployment: str
+    revision: int
+    previous_revision: int
+    status: str
+    replicas: int = 0
+    available: int = 0
+    images: list[str] = Field(default_factory=list)
+    previous_images: list[str] = Field(default_factory=list)
+
+
+class K8sPlanStep(BaseModel):
+    step_id: str
+    action: Literal["rollout_undo", "noop", "escalate"]
+    target: K8sPlanTarget
+    params: dict[str, Any] = Field(default_factory=dict)
+    expected_effect: str = "available"
+    risk: Literal["low", "medium", "high"] = "high"
+    requires_approval: bool = True
+
+
+class K8sPlan(BaseModel):
+    template_id: str
+    template_version: str
+    target_kind: Literal["k8s_deployment"] = "k8s_deployment"
+    goal: str = ""
+    target: K8sPlanTarget
+    variables: dict[str, Any]
+    steps: list[K8sPlanStep]
+    rationale: str = ""
+    warnings: list[str] = Field(default_factory=list)
+    generated_by: Literal["rules"] = "rules"
     evidence_hash: str = ""
 
 
@@ -193,6 +266,10 @@ class GoalView(BaseModel):
     rejected_at: str = ""
     reject_reason: str = ""
     execute_before: str = ""
+    execute_by: str = ""
+    execute_requested_at: str = ""
+    execute_count: int = 0
+    target_kind: str = "proxmox_guest"
     run: dict[str, Any] | None = None
     result: dict[str, Any] | None = None
     error: str = ""
@@ -200,6 +277,7 @@ class GoalView(BaseModel):
     updated_at: str = ""
     can_approve: bool = False
     can_execute: bool = False
+    can_reconcile: bool = False
     approval_mode: str = ""
     execution_enabled: bool = False
     high_risk: bool = False
@@ -237,3 +315,4 @@ class ActionResponse(BaseModel):
     ok: bool = True
     goal: GoalView
     message: str = ""
+    accepted: bool = False

@@ -22,6 +22,7 @@ from .schemas import (
     PreviewRequest,
     PreviewResponse,
     RejectRequest,
+    TargetsResponse,
     TemplatesResponse,
 )
 from .service import Actor, GoalService
@@ -86,6 +87,14 @@ async def list_goals(
     return _service(request).list(_actor(request), status=status, limit=limit, cursor=cursor)
 
 
+@router.get("/targets", response_model=TargetsResponse)
+async def targets(
+    request: Request,
+    template_id: str = Query(min_length=1, max_length=64),
+) -> TargetsResponse:
+    return await _service(request).targets(template_id)
+
+
 @router.get("/{goal_id}", response_model=GoalView)
 async def get_goal(request: Request, goal_id: str) -> GoalView:
     return _service(request).get(_actor(request), goal_id)
@@ -123,18 +132,21 @@ async def cancel(
     return ActionResponse(goal=goal, message="cancelled")
 
 
-@router.post("/{goal_id}/execute", response_model=ActionResponse)
+@router.post("/{goal_id}/execute", response_model=ActionResponse, status_code=202)
 async def execute(
     request: Request, goal_id: str, payload: ExecuteRequest
 ) -> ActionResponse:
     user = require_approver(request)
-    _service(request).execute(Actor.from_user(user, request), goal_id, payload.plan_hash)
-    return ActionResponse(goal=_service(request).get(Actor.from_user(user, request), goal_id))
+    actor = Actor.from_user(user, request)
+    goal = await _service(request).execute(
+        actor, goal_id, payload.plan_hash, payload.confirm
+    )
+    return ActionResponse(goal=goal, message="accepted", accepted=True)
 
 
 @router.post("/{goal_id}/reconcile", response_model=ActionResponse)
 async def reconcile(request: Request, goal_id: str) -> ActionResponse:
     user = require_approver(request)
     actor = Actor.from_user(user, request)
-    _service(request).reconcile(actor, goal_id)
-    return ActionResponse(goal=_service(request).get(actor, goal_id))
+    goal = await _service(request).reconcile(actor, goal_id)
+    return ActionResponse(goal=goal, message="reconciled")
